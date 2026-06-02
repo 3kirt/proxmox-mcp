@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-02
+
 ### Added
 - `proxmox_guest_find` — resolve a guest name (VM or container) to its node +
   vmid across the whole cluster (case-insensitive substring; omit the name to
