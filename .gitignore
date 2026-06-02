@@ -1,1 +1,9 @@
 /target
+
+# Stray binary from `cargo install --path .`
+/proxmox-mcp
+
+# Local-only Claude Code + MCP config (may contain credentials)
+.claude/settings.local.json
+.mcp.json
+.mcp.*.json
