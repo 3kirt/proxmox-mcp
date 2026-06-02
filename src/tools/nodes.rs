@@ -29,6 +29,8 @@ pub struct NodeTasksParams {
     pub errors: Option<bool>,
     #[schemars(description = "Only list tasks since this UNIX epoch")]
     pub since: Option<i64>,
+    #[schemars(description = "Only list tasks of this type (e.g. vzdump, qmstart, qmshutdown)")]
+    pub r#type: Option<String>,
 }
 
 /// Read the finished-task list for one node.
@@ -38,6 +40,7 @@ pub async fn node_tasks(client: &ProxmoxClient, p: NodeTasksParams) -> Result<Va
         .opt("limit", p.limit)
         .opt("errors", p.errors.map(|b| b as i32))
         .opt("since", p.since)
+        .opt("typefilter", p.r#type)
         .into_params();
     client.get(&path, &params).await
 }
@@ -60,7 +63,20 @@ pub async fn qemu_list(client: &ProxmoxClient, p: QemuListParams) -> Result<Valu
     let params = QueryBuilder::new()
         .opt("full", p.full.map(|b| b as i32))
         .into_params();
-    client.get(&path, &params).await
+    let mut data = client.get(&path, &params).await?;
+
+    // `full=true` attaches per-VM `blockstat` (raw QEMU block-I/O counters) to
+    // every entry. On a busy cluster this runs to ~100k chars and can blow the
+    // MCP context limit. The same data is available per-VM via
+    // proxmox_qemu_status, so drop it from the list view.
+    if let Value::Array(vms) = &mut data {
+        for vm in vms {
+            if let Value::Object(map) = vm {
+                map.remove("blockstat");
+            }
+        }
+    }
+    Ok(data)
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]

@@ -71,6 +71,7 @@ impl Config {
                 anyhow!("Proxmox URL not set: provide PROXMOX_URL or set \"url\" in config file")
             })?;
         enforce_https(&url)?;
+        let url = normalize_url(&url);
 
         let token = std::env::var("PROXMOX_TOKEN")
             .ok()
@@ -92,6 +93,19 @@ impl Config {
             token,
             insecure,
         })
+    }
+}
+
+/// Proxmox serves its REST API under the `/api2/json` path. Users routinely
+/// point the config at a bare `https://host:8006`, which makes every call 500
+/// with a misleading `no such file '/version'`. Append the path when it is
+/// missing so the bare host form just works.
+fn normalize_url(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    if trimmed.ends_with("/api2/json") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/api2/json")
     }
 }
 
@@ -297,6 +311,44 @@ mod tests {
         assert!(enforce_https("http://localhost:8006").is_err());
         assert!(enforce_https("ftp://pve.example.com").is_err());
         assert!(enforce_https("").is_err());
+    }
+
+    #[test]
+    fn normalize_url_appends_api_path_when_missing() {
+        assert_eq!(
+            normalize_url("https://pve.example.com:8006"),
+            "https://pve.example.com:8006/api2/json"
+        );
+        assert_eq!(
+            normalize_url("https://pve.example.com:8006/"),
+            "https://pve.example.com:8006/api2/json"
+        );
+    }
+
+    #[test]
+    fn normalize_url_leaves_existing_api_path_intact() {
+        assert_eq!(
+            normalize_url("https://pve.example.com:8006/api2/json"),
+            "https://pve.example.com:8006/api2/json"
+        );
+        assert_eq!(
+            normalize_url("https://pve.example.com:8006/api2/json/"),
+            "https://pve.example.com:8006/api2/json"
+        );
+    }
+
+    #[test]
+    fn resolve_normalizes_bare_host_url() {
+        let _guard = lock_env();
+        clear_env();
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            r#"{"url":"https://pve.example.com:8006","token":"u@pam!t=x"}"#,
+        );
+        let cfg = Config::load(Some(&path)).unwrap();
+        let conn = cfg.resolve().unwrap();
+        assert_eq!(conn.url, "https://pve.example.com:8006/api2/json");
     }
 
     #[test]

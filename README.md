@@ -23,11 +23,30 @@ Settings come from `~/.proxmox_mcp.json` (env vars override the file):
 
 | Field | Env var | Notes |
 |-------|---------|-------|
-| `url` | `PROXMOX_URL` | Must be `https://`. Include the `/api2/json` path. |
+| `url` | `PROXMOX_URL` | Must be `https://`. The `/api2/json` path is appended automatically if you omit it, so `https://host:8006` also works. |
 | `token` | `PROXMOX_TOKEN` | API token, format `USER@REALM!TOKENID=UUID`. |
 | `insecure` | `PROXMOX_INSECURE` | `true` accepts self-signed TLS certs (homelab default). |
 
-The config file must not be world-readable (the server refuses `o+r`).
+**The Proxmox API lives under `/api2/json`.** You can point `url` at the bare
+host (`https://host:8006`) — the server appends the path for you — but a config
+pointed at the wrong path is the most common setup mistake.
+
+**Token format with `@` in the username.** The full `USER@REALM` is preserved
+verbatim, *including* any `@` inside the username. Custom realms with
+email-style usernames therefore look doubled, and that is correct:
+
+```
+user@example.com@pve!mcp=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
+
+Don't truncate the first `@` segment.
+
+**Lock down the config file.** The server refuses to start if the file is
+world-readable, to keep the token from leaking:
+
+```sh
+chmod 600 ~/.proxmox_mcp.json
+```
 
 ### Creating a read-only token
 
@@ -44,6 +63,7 @@ pveum acl modify / -token 'monitoring@pve!mcp' -role PVEAuditor
 | `proxmox_cluster_status` | `/cluster/status` |
 | `proxmox_cluster_resources` | `/cluster/resources` |
 | `proxmox_cluster_tasks` | `/cluster/tasks` |
+| `proxmox_guest_find` | `/cluster/resources?type=vm` (name filter) |
 | `proxmox_nodes_list` | `/nodes` |
 | `proxmox_node_status` | `/nodes/{node}/status` |
 | `proxmox_node_tasks` | `/nodes/{node}/tasks` |
@@ -58,6 +78,26 @@ pveum acl modify / -token 'monitoring@pve!mcp' -role PVEAuditor
 
 `proxmox_cluster_resources` is the best starting point — it returns every VM,
 container, storage, and node across the cluster in a single call.
+`proxmox_guest_find` resolves a guest name (VM or container) to its node + vmid
+(call it with no name to list every guest cluster-wide).
+
+UNIX-epoch fields (`ctime`, `starttime`, `endtime`) are returned with an
+`<field>_iso` ISO 8601 sibling alongside the raw number.
+
+### Troubleshooting
+
+- **`proxmox_storage_content` returns an empty list.** If a storage shows space
+  used but the content list is empty, the token most likely lacks
+  `Datastore.Audit` on that storage. When Proxmox reports a partial permission
+  failure the server now surfaces it as an error rather than returning `[]`
+  silently. Grant the read-only `PVEAuditor` role — on `/` to cover everything,
+  or scoped to the one storage:
+
+  ```sh
+  pveum acl modify /storage/<id> -token '<user>@<realm>!<tokenid>' -role PVEAuditor
+  ```
+- **Every call fails with `no such file '/version'`.** The `url` is missing the
+  `/api2/json` path — recent versions append it automatically; upgrade or add it.
 
 ## Build & run
 

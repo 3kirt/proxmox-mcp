@@ -13,6 +13,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub enum ProxmoxError {
     #[error("Proxmox API error {status}: {body}")]
     Api { status: StatusCode, body: String },
+    #[error(
+        "Proxmox reported errors for this request (often a missing token privilege, \
+         e.g. Datastore.Audit on the storage): {0}"
+    )]
+    Partial(String),
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 }
@@ -83,6 +88,21 @@ impl ProxmoxClient {
         let url = format!("{}{}", self.base_url, path);
         let resp = self.http.get(&url).query(params).send().await?;
         let body = self.handle_response(resp).await?;
+
+        // Some endpoints (notably storage content) answer 200 with an empty
+        // `data` array *and* a non-empty `errors` map describing a partial
+        // failure — typically a privilege gap. Surface that instead of silently
+        // returning the empty payload.
+        //
+        // Only do this when `data` is empty: aggregating endpoints
+        // (`/cluster/resources`, `/cluster/tasks`) also use `errors` to report
+        // per-item failures while still returning useful data for everything
+        // else, and we must not discard that good data over one bad item.
+        if data_is_empty(&body)
+            && let Some(errors) = body.get("errors").filter(|e| !is_errors_empty(e))
+        {
+            return Err(ProxmoxError::Partial(errors.to_string()));
+        }
         Ok(unwrap_data(body))
     }
 
@@ -93,6 +113,30 @@ impl ProxmoxClient {
             return Err(ProxmoxError::Api { status, body });
         }
         Ok(resp.json().await?)
+    }
+}
+
+/// Whether the envelope's `data` carries no useful payload (absent, `null`, or
+/// an empty array/object). Used to decide whether a non-empty `errors` map
+/// represents a total failure worth surfacing or merely a partial one.
+fn data_is_empty(body: &Value) -> bool {
+    match body.get("data") {
+        None | Some(Value::Null) => true,
+        Some(Value::Array(a)) => a.is_empty(),
+        Some(Value::Object(m)) => m.is_empty(),
+        _ => false,
+    }
+}
+
+/// Whether an envelope `errors` value carries no actual error. Proxmox may
+/// include the key as `null`, an empty object, or an empty array on success.
+fn is_errors_empty(v: &Value) -> bool {
+    match v {
+        Value::Null => true,
+        Value::Object(m) => m.is_empty(),
+        Value::Array(a) => a.is_empty(),
+        Value::String(s) => s.is_empty(),
+        _ => false,
     }
 }
 
@@ -193,6 +237,75 @@ mod tests {
             }
             other => panic!("expected Api error, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn get_surfaces_non_empty_errors_envelope() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/nodes/pve1/storage/backup/content"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [],
+                "errors": { "backup": "permission denied" }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let err = client
+            .get("/nodes/pve1/storage/backup/content", &[])
+            .await
+            .unwrap_err();
+        match err {
+            ProxmoxError::Partial(body) => assert!(body.contains("permission denied")),
+            other => panic!("expected Partial error, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_keeps_partial_data_alongside_errors() {
+        // Aggregating endpoints report per-item failures in `errors` while
+        // still returning useful `data`. We must not discard the good data.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/cluster/resources"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{ "id": "qemu/100" }],
+                "errors": { "pve2": "node down" }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let v = client.get("/cluster/resources", &[]).await.unwrap();
+        assert_eq!(v, json!([{ "id": "qemu/100" }]));
+    }
+
+    #[tokio::test]
+    async fn get_ignores_empty_errors_envelope() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/cluster/tasks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{ "upid": "UPID:..." }],
+                "errors": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let v = client.get("/cluster/tasks", &[]).await.unwrap();
+        assert_eq!(v, json!([{ "upid": "UPID:..." }]));
+    }
+
+    #[test]
+    fn is_errors_empty_classifies_envelope_shapes() {
+        assert!(is_errors_empty(&json!(null)));
+        assert!(is_errors_empty(&json!({})));
+        assert!(is_errors_empty(&json!([])));
+        assert!(is_errors_empty(&json!("")));
+        assert!(!is_errors_empty(&json!({ "store": "denied" })));
+        assert!(!is_errors_empty(&json!(["denied"])));
     }
 
     #[test]

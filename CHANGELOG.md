@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+- `proxmox_guest_find` — resolve a guest name (VM or container) to its node +
+  vmid across the whole cluster (case-insensitive substring; omit the name to
+  list every guest). One call replaces a full `proxmox_cluster_resources` dump
+  scanned by hand.
+- `proxmox_cluster_tasks` now accepts `limit` (default 50), `errors`, `since`,
+  and `node` filters (applied client-side, as the API takes no parameters).
+- `proxmox_node_tasks` gained a `type` filter (Proxmox `typefilter`).
+- ISO 8601 `<field>_iso` siblings are added next to epoch fields (`ctime`,
+  `starttime`, `endtime`) so timestamps aren't opaque numbers.
+
+### Changed
+- `proxmox_qemu_list` with `full=true` no longer includes per-VM `blockstat`
+  (raw QEMU block-I/O counters), which could exceed MCP context limits on busy
+  clusters. The same data is available per-VM via `proxmox_qemu_status`.
+- The configured `url` now has `/api2/json` appended automatically when missing,
+  so a bare `https://host:8006` works instead of failing with a misleading 500.
+
+### Fixed
+- Responses with an empty `data` and a non-empty `errors` map (e.g. a storage
+  content list denied for want of `Datastore.Audit`) now surface as an error
+  instead of silently returning `[]`. Aggregating endpoints that return useful
+  `data` alongside per-item `errors` (a node down in `cluster/resources`) are
+  left untouched.
+
+### Documentation
+- README: documented the `/api2/json` requirement, the `chmod 600` config
+  permission check, email-style (`@`-in-username) token format, and a
+  troubleshooting section.
+
 ## [0.2.0] — 2026-06-02
 
 First release: a read-only MCP server exposing Proxmox VE data.

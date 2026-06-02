@@ -7,7 +7,7 @@ use rmcp::{
 use serde_json::Value;
 
 mod slim;
-use slim::slim_value;
+use slim::{humanize_value, slim_value};
 
 pub mod cluster;
 pub mod nodes;
@@ -17,7 +17,7 @@ pub mod nodes;
 // --------------------------------------------------------------------------
 
 pub fn json_result(v: Value) -> Result<CallToolResult, McpError> {
-    let v = slim_value(v);
+    let v = slim_value(humanize_value(v));
     let text = serde_json::to_string_pretty(&v)
         .map_err(|e| McpError::internal_error(format!("marshalling response: {e}"), None))?;
     Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -154,7 +154,7 @@ impl ProxmoxMcpServer {
     }
 
     #[tool(
-        description = "List recent tasks across the whole cluster.",
+        description = "List recent tasks across the whole cluster. Filters: limit (default 50), errors (only failures), since (UNIX epoch), node.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_cluster_tasks(
@@ -162,6 +162,17 @@ impl ProxmoxMcpServer {
         Parameters(p): Parameters<cluster::ClusterTasksParams>,
     ) -> Result<CallToolResult, McpError> {
         respond!(self, cluster::cluster_tasks, p, "listing cluster tasks")
+    }
+
+    #[tool(
+        description = "Find VMs/containers anywhere in the cluster by name (case-insensitive substring), resolving each to its node and vmid. Omit name to list every guest cluster-wide. Use this to turn a hostname into the node+vmid that the per-VM tools require.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn proxmox_guest_find(
+        &self,
+        Parameters(p): Parameters<cluster::GuestFindParams>,
+    ) -> Result<CallToolResult, McpError> {
+        respond!(self, cluster::guest_find, p, "finding guests")
     }
 
     // ---- nodes ----
@@ -185,7 +196,7 @@ impl ProxmoxMcpServer {
     }
 
     #[tool(
-        description = "Read the finished-task list for one node. Filters: limit, errors (only failures), since (UNIX epoch).",
+        description = "Read the finished-task list for one node. Filters: limit, errors (only failures), since (UNIX epoch), type (task type, e.g. vzdump).",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_node_tasks(
@@ -197,7 +208,7 @@ impl ProxmoxMcpServer {
 
     // ---- QEMU VMs ----
     #[tool(
-        description = "List QEMU/KVM virtual machines on a node. Set full=true for full status of running VMs.",
+        description = "List QEMU/KVM virtual machines on a node. Set full=true for full status of running VMs (per-VM blockstat is omitted; use proxmox_qemu_status for it). To find a VM by name across the cluster, use proxmox_guest_find.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_qemu_list(
@@ -479,6 +490,101 @@ mod tests {
         let result = slim_value(cluster::cluster_resources(&client, p).await.unwrap());
         assert_eq!(result[0]["vmid"], json!(100));
         assert_no_nulls(&result, "root");
+    }
+
+    #[tokio::test]
+    async fn pipeline_qemu_list_strips_blockstat() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/nodes/pve1/qemu"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [
+                    { "vmid": 100, "name": "web01", "blockstat": { "scsi0": { "rd_bytes": 1 } } }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let p = nodes::QemuListParams {
+            node: "pve1".to_string(),
+            full: Some(true),
+        };
+        let result = nodes::qemu_list(&client, p).await.unwrap();
+        assert_eq!(result[0]["vmid"], json!(100));
+        // The heavy blockstat blob is gone; the useful fields remain.
+        assert!(result[0].get("blockstat").is_none());
+        assert_eq!(result[0]["name"], json!("web01"));
+    }
+
+    #[tokio::test]
+    async fn pipeline_cluster_tasks_filters_client_side() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/cluster/tasks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
+                { "upid": "a", "node": "pve1", "starttime": 100, "status": "OK" },
+                { "upid": "b", "node": "pve2", "starttime": 200, "status": "some error" },
+                { "upid": "c", "node": "pve1", "starttime": 300, "status": "OK" },
+            ]})))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+
+        // node filter
+        let p = cluster::ClusterTasksParams {
+            limit: None,
+            errors: None,
+            since: None,
+            node: Some("pve1".to_string()),
+        };
+        let r = cluster::cluster_tasks(&client, p).await.unwrap();
+        assert_eq!(r.as_array().unwrap().len(), 2);
+
+        // errors filter keeps only the non-OK task
+        let p = cluster::ClusterTasksParams {
+            limit: None,
+            errors: Some(true),
+            since: None,
+            node: None,
+        };
+        let r = cluster::cluster_tasks(&client, p).await.unwrap();
+        assert_eq!(r.as_array().unwrap().len(), 1);
+        assert_eq!(r[0]["upid"], json!("b"));
+
+        // since + limit
+        let p = cluster::ClusterTasksParams {
+            limit: Some(1),
+            errors: None,
+            since: Some(200),
+            node: None,
+        };
+        let r = cluster::cluster_tasks(&client, p).await.unwrap();
+        assert_eq!(r.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pipeline_guest_find_filters_by_name() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/cluster/resources"))
+            .and(query_param("type", "vm"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
+                { "vmid": 100, "name": "web01", "node": "pve1" },
+                { "vmid": 101, "name": "db01", "node": "pve2" },
+            ]})))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let p = cluster::GuestFindParams {
+            name: Some("WEB".to_string()),
+        };
+        let r = cluster::guest_find(&client, p).await.unwrap();
+        assert_eq!(r.as_array().unwrap().len(), 1);
+        assert_eq!(r[0]["vmid"], json!(100));
+        assert_eq!(r[0]["node"], json!("pve1"));
     }
 
     #[tokio::test]
