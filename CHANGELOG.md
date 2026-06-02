@@ -7,21 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [0.2.0] — 2026-06-02
 
-### Added
-- wiremock pipeline tests covering the full HTTP path: `{ "data": ... }`
-  envelope unwrapping, the `PVEAPIToken` auth header, query-param forwarding,
-  path interpolation, `slim_value` null-stripping, and tool-level
-  success/error responses.
-- GPL-3.0 `LICENSE` and GitHub Actions CI (test + clippy/fmt) and release
-  (tagged multi-target builds) workflows.
-
----
-
-## [0.1.0] — 2026-06-02
-
-Initial release: a read-only MCP server exposing Proxmox VE data.
+First release: a read-only MCP server exposing Proxmox VE data.
 
 ### Added
 - stdio MCP server (`rmcp`) wrapping Proxmox VE `GET` endpoints only.
@@ -38,3 +26,16 @@ Initial release: a read-only MCP server exposing Proxmox VE data.
 - `insecure` flag (`danger_accept_invalid_certs`) for self-signed homelab TLS.
 - Response slimming (`slim_value`) that recursively drops null fields, and
   `encode_seg()` path-segment encoding to prevent path injection.
+- wiremock pipeline test suite covering the full HTTP path: `{ "data": ... }`
+  envelope unwrapping, the `PVEAPIToken` auth header, query-param forwarding,
+  path interpolation, `slim_value` null-stripping, and tool-level
+  success/error responses.
+- GPL-3.0 `LICENSE`.
+- GitHub Actions CI (test + clippy/fmt) and release workflows; the release
+  workflow builds linux amd64/arm64 and darwin arm64 binaries with checksums
+  on tagged pushes.
+
+### Documentation
+- README, `CLAUDE.md`, and this changelog.
+- `/release` slash command automating the version bump, dependency audit,
+  quality gate, changelog update, and tag.
