@@ -110,7 +110,90 @@ fn unwrap_data(v: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Connection;
     use serde_json::json;
+    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn mock_client(uri: &str) -> ProxmoxClient {
+        ProxmoxClient::new(Connection {
+            url: uri.to_string(),
+            token: "root@pam!mcp=secret".to_string(),
+            insecure: false,
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn get_unwraps_data_envelope() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/version"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"data": {"release": "8.2"}})),
+            )
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let v = client.get("/version", &[]).await.unwrap();
+        // The `{ "data": ... }` envelope is unwrapped — caller sees the payload.
+        assert_eq!(v, json!({"release": "8.2"}));
+    }
+
+    #[tokio::test]
+    async fn get_sends_pveapitoken_auth_header() {
+        let server = MockServer::start().await;
+        // The mock only matches when the PVEAPIToken header is present and exact;
+        // a wrong/missing header falls through to 404 and fails the unwrap below.
+        Mock::given(method("GET"))
+            .and(path("/version"))
+            .and(header("authorization", "PVEAPIToken=root@pam!mcp=secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {}})))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        assert!(client.get("/version", &[]).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn get_sends_query_params() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/cluster/resources"))
+            .and(query_param("type", "vm"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let v = client
+            .get("/cluster/resources", &[("type", "vm".to_string())])
+            .await
+            .unwrap();
+        assert_eq!(v, json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_non_success_returns_api_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/nodes/ghost/status"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("no such node 'ghost'"))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let err = client.get("/nodes/ghost/status", &[]).await.unwrap_err();
+        match err {
+            ProxmoxError::Api { status, body } => {
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                assert!(body.contains("no such node"), "body was: {body}");
+            }
+            other => panic!("expected Api error, got: {other:?}"),
+        }
+    }
 
     #[test]
     fn unwrap_data_extracts_inner_payload() {

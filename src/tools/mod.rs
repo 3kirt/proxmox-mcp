@@ -328,4 +328,190 @@ mod tests {
             .into_params();
         assert_eq!(params, vec![("a", "1".to_string()), ("c", "x".to_string())]);
     }
+
+    // ------------------------------------------------------------------
+    // Pipeline tests — exercise the full path through a wiremock server:
+    // domain fn → ProxmoxClient (HTTP + data-envelope unwrap) → slim_value.
+    // ------------------------------------------------------------------
+
+    use crate::config::Connection;
+    use rmcp::handler::server::wrapper::Parameters;
+    use serde_json::{Value, json};
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn mock_client(uri: &str) -> ProxmoxClient {
+        ProxmoxClient::new(Connection {
+            url: uri.to_string(),
+            token: "root@pam!mcp=secret".to_string(),
+            insecure: false,
+        })
+        .unwrap()
+    }
+
+    fn mock_server(uri: &str) -> ProxmoxMcpServer {
+        ProxmoxMcpServer::new(Connection {
+            url: uri.to_string(),
+            token: "root@pam!mcp=secret".to_string(),
+            insecure: false,
+        })
+        .unwrap()
+    }
+
+    /// Recursively assert no object field anywhere in `v` is JSON null.
+    fn assert_no_nulls(v: &Value, ctx: &str) {
+        match v {
+            Value::Object(m) => {
+                for (k, val) in m {
+                    assert!(!val.is_null(), "unexpected null at {ctx}.{k}");
+                    assert_no_nulls(val, &format!("{ctx}.{k}"));
+                }
+            }
+            Value::Array(a) => {
+                for (i, val) in a.iter().enumerate() {
+                    assert_no_nulls(val, &format!("{ctx}[{i}]"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_node_status_unwraps_and_slims() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/nodes/pve1/status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "uptime": 1000, "cpu": 0.05, "lock": null }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let p = nodes::NodeParams {
+            node: "pve1".to_string(),
+        };
+        let raw = nodes::node_status(&client, p).await.unwrap();
+        let result = slim_value(raw);
+
+        // Envelope unwrapped to the inner object, and the null `lock` is gone.
+        assert_eq!(result["uptime"], json!(1000));
+        assert!(result.get("lock").is_none());
+        assert_no_nulls(&result, "root");
+    }
+
+    #[tokio::test]
+    async fn pipeline_qemu_config_interpolates_node_and_vmid() {
+        let server = MockServer::start().await;
+        // Mounted on the exact interpolated path; a wrong path 404s and unwrap fails.
+        Mock::given(method("GET"))
+            .and(path("/nodes/pve1/qemu/100/config"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "name": "web01", "cores": 2 }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let p = nodes::GuestParams {
+            node: "pve1".to_string(),
+            vmid: 100,
+        };
+        let result = nodes::qemu_config(&client, p).await.unwrap();
+        assert_eq!(result["name"], json!("web01"));
+    }
+
+    #[tokio::test]
+    async fn pipeline_qemu_list_sends_full_param() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/nodes/pve1/qemu"))
+            .and(query_param("full", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let p = nodes::QemuListParams {
+            node: "pve1".to_string(),
+            full: Some(true),
+        };
+        // The bool is serialized to Proxmox's `1`; mismatch would 404 and fail.
+        assert!(nodes::qemu_list(&client, p).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn pipeline_storage_content_interpolates_two_segments() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/nodes/pve1/storage/local-zfs/content"))
+            .and(query_param("content", "images"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let p = nodes::StorageContentParams {
+            node: "pve1".to_string(),
+            storage: "local-zfs".to_string(),
+            content: Some("images".to_string()),
+            vmid: None,
+        };
+        assert!(nodes::storage_content(&client, p).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn pipeline_cluster_resources_passes_type_filter() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/cluster/resources"))
+            .and(query_param("type", "vm"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{ "vmid": 100, "type": "qemu", "template": null }]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let p = cluster::ClusterResourcesParams {
+            r#type: Some("vm".to_string()),
+        };
+        let result = slim_value(cluster::cluster_resources(&client, p).await.unwrap());
+        assert_eq!(result[0]["vmid"], json!(100));
+        assert_no_nulls(&result, "root");
+    }
+
+    #[tokio::test]
+    async fn server_tool_returns_success_on_200() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/version"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"data": {"release": "8"}})),
+            )
+            .mount(&server)
+            .await;
+
+        let mcp = mock_server(&server.uri());
+        let result = mcp.proxmox_version().await.unwrap();
+        assert_ne!(result.is_error, Some(true));
+    }
+
+    #[tokio::test]
+    async fn server_tool_returns_tool_error_on_api_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/nodes/ghost/status"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("no such node"))
+            .mount(&server)
+            .await;
+
+        let mcp = mock_server(&server.uri());
+        let p = nodes::NodeParams {
+            node: "ghost".to_string(),
+        };
+        // A failed API call surfaces as a tool error, not a transport-level Err.
+        let result = mcp.proxmox_node_status(Parameters(p)).await.unwrap();
+        assert_eq!(result.is_error, Some(true));
+    }
 }
