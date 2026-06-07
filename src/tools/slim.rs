@@ -13,17 +13,15 @@ pub fn humanize_value(v: Value) -> Value {
             let mut out = serde_json::Map::with_capacity(map.len());
             for (k, val) in map {
                 let val = humanize_value(val);
-                let iso = if EPOCH_KEYS.contains(&k.as_str()) {
-                    val.as_i64().and_then(epoch_to_iso)
-                } else {
-                    None
-                };
-                let iso_key = iso.is_some().then(|| format!("{k}_iso"));
-                out.insert(k, val);
-                // Emit the `<key>_iso` sibling right after its source field.
-                if let (Some(key), Some(iso)) = (iso_key, iso) {
-                    out.insert(key, Value::String(iso));
+                // Add an ISO sibling for known epoch keys. Output key order is
+                // alphabetical (serde_json's Map is a BTreeMap), so `<key>_iso`
+                // already sorts next to its source key — no manual ordering here.
+                if EPOCH_KEYS.contains(&k.as_str())
+                    && let Some(iso) = val.as_i64().and_then(epoch_to_iso)
+                {
+                    out.insert(format!("{k}_iso"), Value::String(iso));
                 }
+                out.insert(k, val);
             }
             Value::Object(out)
         }

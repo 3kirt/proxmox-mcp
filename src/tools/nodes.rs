@@ -38,7 +38,7 @@ pub async fn node_tasks(client: &ProxmoxClient, p: NodeTasksParams) -> Result<Va
     let path = format!("/nodes/{}/tasks", encode_seg(&p.node));
     let params = QueryBuilder::new()
         .opt("limit", p.limit)
-        .opt("errors", p.errors.map(|b| b as i32))
+        .flag("errors", p.errors)
         .opt("since", p.since)
         .opt("typefilter", p.r#type)
         .into_params();
@@ -60,9 +60,7 @@ pub struct QemuListParams {
 /// List QEMU/KVM virtual machines on one node.
 pub async fn qemu_list(client: &ProxmoxClient, p: QemuListParams) -> Result<Value, ProxmoxError> {
     let path = format!("/nodes/{}/qemu", encode_seg(&p.node));
-    let params = QueryBuilder::new()
-        .opt("full", p.full.map(|b| b as i32))
-        .into_params();
+    let params = QueryBuilder::new().flag("full", p.full).into_params();
     let mut data = client.get(&path, &params).await?;
 
     // `full=true` attaches per-VM `blockstat` (raw QEMU block-I/O counters) to
@@ -153,7 +151,7 @@ pub async fn storage_list(
     let path = format!("/nodes/{}/storage", encode_seg(&p.node));
     let params = QueryBuilder::new()
         .opt("content", p.content)
-        .opt("enabled", p.enabled.map(|b| b as i32))
+        .flag("enabled", p.enabled)
         .into_params();
     client.get(&path, &params).await
 }

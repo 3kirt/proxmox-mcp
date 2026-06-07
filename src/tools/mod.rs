@@ -1,4 +1,4 @@
-use crate::client::ProxmoxClient;
+use crate::client::{ProxmoxClient, ProxmoxError};
 use crate::config::Connection;
 use rmcp::{
     ErrorData as McpError, ServerHandler, handler::server::wrapper::Parameters, model::*, tool,
@@ -61,6 +61,11 @@ impl QueryBuilder {
         self
     }
 
+    /// Append a boolean flag as Proxmox's `1`/`0` if `v` is Some.
+    pub fn flag(self, key: &'static str, v: Option<bool>) -> Self {
+        self.opt(key, v.map(|b| b as i32))
+    }
+
     pub fn into_params(self) -> Vec<(&'static str, String)> {
         self.params
     }
@@ -72,14 +77,23 @@ impl Default for QueryBuilder {
     }
 }
 
+/// Convert a domain-call result into an MCP response: the payload on success,
+/// or a `"{noun}: {error}"` tool error on failure.
+fn into_response(
+    result: Result<Value, ProxmoxError>,
+    noun: &str,
+) -> Result<CallToolResult, McpError> {
+    match result {
+        Ok(v) => json_result(v),
+        Err(e) => tool_error(&format!("{noun}: {}", e.to_tool_message())),
+    }
+}
+
 /// Run a domain function and convert the Result into an MCP response.
 macro_rules! respond {
     ($self:expr, $domain_fn:path, $p:expr, $noun:literal) => {{
         let client = $self.get_client();
-        match $domain_fn(client, $p).await {
-            Ok(v) => json_result(v),
-            Err(e) => tool_error(&format!("{}: {}", $noun, e.to_tool_message())),
-        }
+        into_response($domain_fn(client, $p).await, $noun)
     }};
 }
 
@@ -106,10 +120,7 @@ impl ProxmoxMcpServer {
 
     /// Shared body for the zero-parameter "GET this fixed path" tools.
     async fn get_simple(&self, path: &str, noun: &str) -> Result<CallToolResult, McpError> {
-        match self.client.get(path, &[]).await {
-            Ok(v) => json_result(v),
-            Err(e) => tool_error(&format!("{}: {}", noun, e.to_tool_message())),
-        }
+        into_response(self.client.get(path, &[]).await, noun)
     }
 }
 
