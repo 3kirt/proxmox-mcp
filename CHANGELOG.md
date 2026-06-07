@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-07
+
+### Changed
+- Internal refactor only, no behavior change: the per-tool
+  `Result → CallToolResult` conversion is now a single shared `into_response`
+  helper, a `QueryBuilder::flag` helper centralizes Proxmox `1`/`0` booleans,
+  and `humanize_value`'s epoch-to-ISO insertion was simplified.
+
 ## [0.3.0] — 2026-06-02
 
 ### Added
