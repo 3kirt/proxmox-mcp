@@ -66,7 +66,7 @@ pub async fn qemu_list(client: &ProxmoxClient, p: QemuListParams) -> Result<Valu
     // `full=true` attaches per-VM `blockstat` (raw QEMU block-I/O counters) to
     // every entry. On a busy cluster this runs to ~100k chars and can blow the
     // MCP context limit. The same data is available per-VM via
-    // proxmox_qemu_status, so drop it from the list view.
+    // proxmox_qemu_status_get, so drop it from the list view.
     if let Value::Array(vms) = &mut data {
         for vm in vms {
             if let Value::Object(map) = vm {
@@ -160,7 +160,7 @@ pub async fn storage_list(
 pub struct StorageContentParams {
     #[schemars(description = "Cluster node name")]
     pub node: String,
-    #[schemars(description = "Storage identifier (see proxmox_node_storage_list)")]
+    #[schemars(description = "Storage identifier (see proxmox_storage_list)")]
     pub storage: String,
     #[schemars(description = "Only list content of this type (e.g. images, iso, backup, vztmpl)")]
     pub content: Option<String>,

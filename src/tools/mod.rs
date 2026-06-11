@@ -135,7 +135,7 @@ impl ProxmoxMcpServer {
         description = "Get the Proxmox API version and basic datacenter info.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn proxmox_version(&self) -> Result<CallToolResult, McpError> {
+    async fn proxmox_version_get(&self) -> Result<CallToolResult, McpError> {
         self.get_simple("/version", "getting version").await
     }
 
@@ -143,7 +143,7 @@ impl ProxmoxMcpServer {
         description = "Get cluster status: quorum, nodes, and cluster name. Returns node-level membership info.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn proxmox_cluster_status(&self) -> Result<CallToolResult, McpError> {
+    async fn proxmox_cluster_status_get(&self) -> Result<CallToolResult, McpError> {
         self.get_simple("/cluster/status", "getting cluster status")
             .await
     }
@@ -152,7 +152,7 @@ impl ProxmoxMcpServer {
         description = "Cluster-wide resource index — the best single inventory call. Lists every VM, container, storage, and node. Optional type filter: vm, storage, node, sdn.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn proxmox_cluster_resources(
+    async fn proxmox_cluster_resources_list(
         &self,
         Parameters(p): Parameters<cluster::ClusterResourcesParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -168,7 +168,7 @@ impl ProxmoxMcpServer {
         description = "List recent tasks across the whole cluster. Filters: limit (default 50), errors (only failures), since (UNIX epoch), node.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn proxmox_cluster_tasks(
+    async fn proxmox_cluster_tasks_list(
         &self,
         Parameters(p): Parameters<cluster::ClusterTasksParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -179,7 +179,7 @@ impl ProxmoxMcpServer {
         description = "Find VMs/containers anywhere in the cluster by name (case-insensitive substring), resolving each to its node and vmid. Omit name to list every guest cluster-wide. Use this to turn a hostname into the node+vmid that the per-VM tools require.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn proxmox_guest_find(
+    async fn proxmox_guests_find(
         &self,
         Parameters(p): Parameters<cluster::GuestFindParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -199,7 +199,7 @@ impl ProxmoxMcpServer {
         description = "Read overall status of one node (CPU, memory, uptime, kernel, load).",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn proxmox_node_status(
+    async fn proxmox_nodes_status_get(
         &self,
         Parameters(p): Parameters<nodes::NodeParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -210,7 +210,7 @@ impl ProxmoxMcpServer {
         description = "Read the finished-task list for one node. Filters: limit, errors (only failures), since (UNIX epoch), type (task type, e.g. vzdump).",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn proxmox_node_tasks(
+    async fn proxmox_nodes_tasks_list(
         &self,
         Parameters(p): Parameters<nodes::NodeTasksParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -219,7 +219,7 @@ impl ProxmoxMcpServer {
 
     // ---- QEMU VMs ----
     #[tool(
-        description = "List QEMU/KVM virtual machines on a node. Set full=true for full status of running VMs (per-VM blockstat is omitted; use proxmox_qemu_status for it). To find a VM by name across the cluster, use proxmox_guest_find.",
+        description = "List QEMU/KVM virtual machines on a node. Set full=true for full status of running VMs (per-VM blockstat is omitted; use proxmox_qemu_status_get for it). To find a VM by name across the cluster, use proxmox_guests_find.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_qemu_list(
@@ -233,7 +233,7 @@ impl ProxmoxMcpServer {
         description = "Get the configuration of a QEMU VM (current values plus pending changes).",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn proxmox_qemu_config(
+    async fn proxmox_qemu_config_get(
         &self,
         Parameters(p): Parameters<nodes::GuestParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -244,7 +244,7 @@ impl ProxmoxMcpServer {
         description = "Get the current runtime status of a QEMU VM (running state, CPU, memory, uptime).",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn proxmox_qemu_status(
+    async fn proxmox_qemu_status_get(
         &self,
         Parameters(p): Parameters<nodes::GuestParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -267,7 +267,7 @@ impl ProxmoxMcpServer {
         description = "Get the configuration of an LXC container.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn proxmox_lxc_config(
+    async fn proxmox_lxc_config_get(
         &self,
         Parameters(p): Parameters<nodes::GuestParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -278,7 +278,7 @@ impl ProxmoxMcpServer {
         description = "Get the current runtime status of an LXC container.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn proxmox_lxc_status(
+    async fn proxmox_lxc_status_get(
         &self,
         Parameters(p): Parameters<nodes::GuestParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -290,7 +290,7 @@ impl ProxmoxMcpServer {
         description = "Get status for all datastores on a node. Filters: content (e.g. images, iso, backup), enabled.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn proxmox_node_storage_list(
+    async fn proxmox_storage_list(
         &self,
         Parameters(p): Parameters<nodes::StorageListParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -301,7 +301,7 @@ impl ProxmoxMcpServer {
         description = "List the content (disk images, ISOs, backups, templates) of one storage on a node. Filters: content type, vmid.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
-    async fn proxmox_storage_content(
+    async fn proxmox_storage_content_list(
         &self,
         Parameters(p): Parameters<nodes::StorageContentParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -610,7 +610,7 @@ mod tests {
             .await;
 
         let mcp = mock_server(&server.uri());
-        let result = mcp.proxmox_version().await.unwrap();
+        let result = mcp.proxmox_version_get().await.unwrap();
         assert_ne!(result.is_error, Some(true));
     }
 
@@ -628,7 +628,7 @@ mod tests {
             node: "ghost".to_string(),
         };
         // A failed API call surfaces as a tool error, not a transport-level Err.
-        let result = mcp.proxmox_node_status(Parameters(p)).await.unwrap();
+        let result = mcp.proxmox_nodes_status_get(Parameters(p)).await.unwrap();
         assert_eq!(result.is_error, Some(true));
     }
 }

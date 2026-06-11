@@ -59,26 +59,26 @@ pveum acl modify / -token 'monitoring@pve!mcp' -role PVEAuditor
 
 | Tool | Endpoint |
 |------|----------|
-| `proxmox_version` | `/version` |
-| `proxmox_cluster_status` | `/cluster/status` |
-| `proxmox_cluster_resources` | `/cluster/resources` |
-| `proxmox_cluster_tasks` | `/cluster/tasks` |
-| `proxmox_guest_find` | `/cluster/resources?type=vm` (name filter) |
+| `proxmox_version_get` | `/version` |
+| `proxmox_cluster_status_get` | `/cluster/status` |
+| `proxmox_cluster_resources_list` | `/cluster/resources` |
+| `proxmox_cluster_tasks_list` | `/cluster/tasks` |
+| `proxmox_guests_find` | `/cluster/resources?type=vm` (name filter) |
 | `proxmox_nodes_list` | `/nodes` |
-| `proxmox_node_status` | `/nodes/{node}/status` |
-| `proxmox_node_tasks` | `/nodes/{node}/tasks` |
+| `proxmox_nodes_status_get` | `/nodes/{node}/status` |
+| `proxmox_nodes_tasks_list` | `/nodes/{node}/tasks` |
 | `proxmox_qemu_list` | `/nodes/{node}/qemu` |
-| `proxmox_qemu_config` | `/nodes/{node}/qemu/{vmid}/config` |
-| `proxmox_qemu_status` | `/nodes/{node}/qemu/{vmid}/status/current` |
+| `proxmox_qemu_config_get` | `/nodes/{node}/qemu/{vmid}/config` |
+| `proxmox_qemu_status_get` | `/nodes/{node}/qemu/{vmid}/status/current` |
 | `proxmox_lxc_list` | `/nodes/{node}/lxc` |
-| `proxmox_lxc_config` | `/nodes/{node}/lxc/{vmid}/config` |
-| `proxmox_lxc_status` | `/nodes/{node}/lxc/{vmid}/status/current` |
-| `proxmox_node_storage_list` | `/nodes/{node}/storage` |
-| `proxmox_storage_content` | `/nodes/{node}/storage/{storage}/content` |
+| `proxmox_lxc_config_get` | `/nodes/{node}/lxc/{vmid}/config` |
+| `proxmox_lxc_status_get` | `/nodes/{node}/lxc/{vmid}/status/current` |
+| `proxmox_storage_list` | `/nodes/{node}/storage` |
+| `proxmox_storage_content_list` | `/nodes/{node}/storage/{storage}/content` |
 
-`proxmox_cluster_resources` is the best starting point — it returns every VM,
+`proxmox_cluster_resources_list` is the best starting point — it returns every VM,
 container, storage, and node across the cluster in a single call.
-`proxmox_guest_find` resolves a guest name (VM or container) to its node + vmid
+`proxmox_guests_find` resolves a guest name (VM or container) to its node + vmid
 (call it with no name to list every guest cluster-wide).
 
 UNIX-epoch fields (`ctime`, `starttime`, `endtime`) are returned with an
@@ -86,7 +86,7 @@ UNIX-epoch fields (`ctime`, `starttime`, `endtime`) are returned with an
 
 ### Troubleshooting
 
-- **`proxmox_storage_content` returns an empty list.** If a storage shows space
+- **`proxmox_storage_content_list` returns an empty list.** If a storage shows space
   used but the content list is empty, the token most likely lacks
   `Datastore.Audit` on that storage. When Proxmox reports a partial permission
   failure the server now surfaces it as an error rather than returning `[]`

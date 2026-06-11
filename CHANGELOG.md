@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Breaking:** all tool names now follow the `proxmox_<resource>_<verb>`
+  convention shared with gitlab-mcp — resource segments are plural and every
+  tool ends in an action verb. Renames: `proxmox_version` →
+  `proxmox_version_get`, `proxmox_cluster_status` → `proxmox_cluster_status_get`,
+  `proxmox_cluster_resources` → `proxmox_cluster_resources_list`,
+  `proxmox_cluster_tasks` → `proxmox_cluster_tasks_list`, `proxmox_guest_find` →
+  `proxmox_guests_find`, `proxmox_node_status` → `proxmox_nodes_status_get`,
+  `proxmox_node_tasks` → `proxmox_nodes_tasks_list`, `proxmox_qemu_config` →
+  `proxmox_qemu_config_get`, `proxmox_qemu_status` → `proxmox_qemu_status_get`,
+  `proxmox_lxc_config` → `proxmox_lxc_config_get`, `proxmox_lxc_status` →
+  `proxmox_lxc_status_get`, `proxmox_node_storage_list` → `proxmox_storage_list`,
+  and `proxmox_storage_content` → `proxmox_storage_content_list`.
+  `proxmox_nodes_list`, `proxmox_qemu_list`, and `proxmox_lxc_list` are
+  unchanged. MCP clients referencing the old names must update.
+
 ## [0.4.0] — 2026-06-07
 
 ### Changed
