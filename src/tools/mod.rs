@@ -1,10 +1,14 @@
 use crate::client::{ProxmoxClient, ProxmoxError};
 use crate::config::Connection;
 use rmcp::{
-    ErrorData as McpError, ServerHandler, handler::server::wrapper::Parameters, model::*, tool,
-    tool_handler, tool_router,
+    ErrorData as McpError, Peer, RoleServer, ServerHandler,
+    handler::server::wrapper::Parameters,
+    model::*,
+    service::{NotificationContext, RequestContext},
+    tool, tool_handler, tool_router,
 };
 use serde_json::Value;
+use std::sync::{Arc, Mutex, OnceLock};
 
 mod slim;
 use slim::{humanize_value, slim_value};
@@ -77,15 +81,18 @@ impl Default for QueryBuilder {
     }
 }
 
-/// Convert a domain-call result into an MCP response: the payload on success,
-/// or a `"{noun}: {error}"` tool error on failure.
-fn into_response(
-    result: Result<Value, ProxmoxError>,
-    noun: &str,
-) -> Result<CallToolResult, McpError> {
-    match result {
-        Ok(v) => json_result(v),
-        Err(e) => tool_error(&format!("{noun}: {}", e.to_tool_message())),
+/// Numeric severity ordering for MCP logging levels, used to decide whether a
+/// message clears the client-requested threshold.
+fn level_severity(level: LoggingLevel) -> u8 {
+    match level {
+        LoggingLevel::Debug => 0,
+        LoggingLevel::Info => 1,
+        LoggingLevel::Notice => 2,
+        LoggingLevel::Warning => 3,
+        LoggingLevel::Error => 4,
+        LoggingLevel::Critical => 5,
+        LoggingLevel::Alert => 6,
+        LoggingLevel::Emergency => 7,
     }
 }
 
@@ -93,7 +100,7 @@ fn into_response(
 macro_rules! respond {
     ($self:expr, $domain_fn:path, $p:expr, $noun:literal) => {{
         let client = $self.get_client();
-        into_response($domain_fn(client, $p).await, $noun)
+        $self.respond($domain_fn(client, $p).await, $noun).await
     }};
 }
 
@@ -101,16 +108,26 @@ macro_rules! respond {
 // Server struct
 // --------------------------------------------------------------------------
 
-/// The MCP server — holds a Proxmox client.
+/// The MCP server — holds a Proxmox client plus the connected peer and the
+/// client-requested log level, so tool failures can be surfaced as MCP log
+/// notifications.
 #[derive(Clone)]
 pub struct ProxmoxMcpServer {
     client: ProxmoxClient,
+    /// Set once the client connects (`on_initialized`/`set_level`); `None`
+    /// before then, which makes `send_log` a no-op (e.g. in unit tests).
+    peer: Arc<OnceLock<Peer<RoleServer>>>,
+    /// Minimum level the client wants delivered (default Warning until it sends
+    /// `logging/setLevel`).
+    log_level: Arc<Mutex<LoggingLevel>>,
 }
 
 impl ProxmoxMcpServer {
     pub fn new(conn: Connection) -> anyhow::Result<Self> {
         Ok(Self {
             client: ProxmoxClient::new(conn)?,
+            peer: Arc::new(OnceLock::new()),
+            log_level: Arc::new(Mutex::new(LoggingLevel::Warning)),
         })
     }
 
@@ -118,9 +135,45 @@ impl ProxmoxMcpServer {
         &self.client
     }
 
+    /// Send an MCP `notifications/message` to the client if a peer is connected
+    /// and `level` meets the client-requested threshold. Best-effort: a delivery
+    /// failure is swallowed rather than masking the tool result it accompanies.
+    async fn send_log(&self, level: LoggingLevel, message: &str) {
+        let current = *self.log_level.lock().unwrap();
+        if level_severity(level) >= level_severity(current)
+            && let Some(peer) = self.peer.get()
+        {
+            let _ = peer
+                .notify_logging_message(LoggingMessageNotificationParam {
+                    level,
+                    logger: Some("proxmox-mcp".to_string()),
+                    data: serde_json::json!({ "message": message }),
+                })
+                .await;
+        }
+    }
+
+    /// Convert a domain-call result into an MCP response: the payload on
+    /// success, or a `"{noun}: {error}"` tool error on failure. The error path
+    /// also emits an `Error`-level MCP log so the client sees why a call failed.
+    async fn respond(
+        &self,
+        result: Result<Value, ProxmoxError>,
+        noun: &str,
+    ) -> Result<CallToolResult, McpError> {
+        match result {
+            Ok(v) => json_result(v),
+            Err(e) => {
+                let msg = format!("{noun}: {}", e.to_tool_message());
+                self.send_log(LoggingLevel::Error, &msg).await;
+                tool_error(&msg)
+            }
+        }
+    }
+
     /// Shared body for the zero-parameter "GET this fixed path" tools.
     async fn get_simple(&self, path: &str, noun: &str) -> Result<CallToolResult, McpError> {
-        into_response(self.client.get(path, &[]).await, noun)
+        self.respond(self.client.get(path, &[]).await, noun).await
     }
 }
 
@@ -316,9 +369,30 @@ impl ProxmoxMcpServer {
 #[tool_handler]
 impl ServerHandler for ProxmoxMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
-            Implementation::new("proxmox-mcp", env!("CARGO_PKG_VERSION")),
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_logging()
+                .build(),
         )
+        .with_server_info(Implementation::new(
+            "proxmox-mcp",
+            env!("CARGO_PKG_VERSION"),
+        ))
+    }
+
+    async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
+        let _ = self.peer.set(context.peer);
+    }
+
+    async fn set_level(
+        &self,
+        request: SetLevelRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        *self.log_level.lock().unwrap() = request.level;
+        let _ = self.peer.set(context.peer);
+        Ok(())
     }
 }
 
@@ -349,6 +423,17 @@ mod tests {
             .opt("c", Some("x".to_string()))
             .into_params();
         assert_eq!(params, vec![("a", "1".to_string()), ("c", "x".to_string())]);
+    }
+
+    #[test]
+    fn level_severity_orders_low_to_high() {
+        // send_log compares these, so the ordering must be monotonic: a message
+        // is delivered only when its level is at least the client's threshold.
+        assert!(level_severity(LoggingLevel::Debug) < level_severity(LoggingLevel::Info));
+        assert!(level_severity(LoggingLevel::Info) < level_severity(LoggingLevel::Warning));
+        assert!(level_severity(LoggingLevel::Warning) < level_severity(LoggingLevel::Error));
+        assert!(level_severity(LoggingLevel::Error) < level_severity(LoggingLevel::Critical));
+        assert!(level_severity(LoggingLevel::Critical) < level_severity(LoggingLevel::Emergency));
     }
 
     // ------------------------------------------------------------------

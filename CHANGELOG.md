@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Tool failures are now emitted as MCP `notifications/message` logs (the server
+  advertises the `logging` capability and honors the client's `logging/setLevel`
+  threshold), so clients see *why* a call failed, not just an error result.
+
 ### Changed
 - **Breaking:** all tool names now follow the `proxmox_<resource>_<verb>`
   convention shared with gitlab-mcp — resource segments are plural and every
