@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-06-10
+
 ### Added
 - Tool failures are now emitted as MCP `notifications/message` logs (the server
   advertises the `logging` capability and honors the client's `logging/setLevel`
