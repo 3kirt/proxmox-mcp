@@ -185,7 +185,7 @@ impl ProxmoxMcpServer {
 impl ProxmoxMcpServer {
     // ---- cluster / global ----
     #[tool(
-        description = "Get the Proxmox API version and basic datacenter info.",
+        description = "Get the Proxmox VE API version and basic datacenter info. Doubles as a quick connectivity/health check that the server is reachable and the token works.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_version_get(&self) -> Result<CallToolResult, McpError> {
@@ -193,7 +193,7 @@ impl ProxmoxMcpServer {
     }
 
     #[tool(
-        description = "Get cluster status: quorum, nodes, and cluster name. Returns node-level membership info.",
+        description = "Get cluster health: quorum state, member nodes, and cluster name. Use this to check whether the cluster is quorate and every node is online.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_cluster_status_get(&self) -> Result<CallToolResult, McpError> {
@@ -202,7 +202,7 @@ impl ProxmoxMcpServer {
     }
 
     #[tool(
-        description = "Cluster-wide resource index — the best single inventory call. Lists every VM, container, storage, and node. Optional type filter: vm, storage, node, sdn.",
+        description = "List the entire cluster inventory in one call — every VM, container, storage, and node, with live CPU/memory/disk usage. The best starting point for \"what's running\" or for locating where a guest lives. Optional type filter: vm, storage, node, sdn. To search by guest name, use proxmox_guests_find.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_cluster_resources_list(
@@ -218,7 +218,7 @@ impl ProxmoxMcpServer {
     }
 
     #[tool(
-        description = "List recent tasks across the whole cluster. Filters: limit (default 50), errors (only failures), since (UNIX epoch), node.",
+        description = "List recent tasks (jobs/operations — backups, migrations, snapshots, start/stop) across the whole cluster, most recent first. Use this for \"what happened recently\" or to hunt failures. Filters: limit (default 50), errors (only failures), since (UNIX epoch), node. For a single node, use proxmox_nodes_tasks_list.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_cluster_tasks_list(
@@ -241,7 +241,7 @@ impl ProxmoxMcpServer {
 
     // ---- nodes ----
     #[tool(
-        description = "List all nodes in the cluster with status, CPU, and memory.",
+        description = "List the cluster's nodes (the physical hosts/servers running Proxmox) with status, CPU, and memory.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_nodes_list(&self) -> Result<CallToolResult, McpError> {
@@ -249,7 +249,7 @@ impl ProxmoxMcpServer {
     }
 
     #[tool(
-        description = "Read overall status of one node (CPU, memory, uptime, kernel, load).",
+        description = "Get detailed status for one node (a physical host): CPU, memory, load average, uptime, and kernel. Node names come from proxmox_nodes_list.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_nodes_status_get(
@@ -260,7 +260,7 @@ impl ProxmoxMcpServer {
     }
 
     #[tool(
-        description = "Read the finished-task list for one node. Filters: limit, errors (only failures), since (UNIX epoch), type (task type, e.g. vzdump).",
+        description = "List recent tasks (jobs/operations: backups/vzdump, migrations, start/stop) that ran on one node, most recent first. Filters: limit, errors (only failures), since (UNIX epoch), type (e.g. vzdump for backups). For the whole cluster, use proxmox_cluster_tasks_list.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_nodes_tasks_list(
@@ -272,7 +272,7 @@ impl ProxmoxMcpServer {
 
     // ---- QEMU VMs ----
     #[tool(
-        description = "List QEMU/KVM virtual machines on a node. Set full=true for full status of running VMs (per-VM blockstat is omitted; use proxmox_qemu_status_get for it). To find a VM by name across the cluster, use proxmox_guests_find.",
+        description = "List QEMU/KVM virtual machines (VMs) on a node. Set full=true for live status of running VMs (per-VM blockstat is omitted; use proxmox_qemu_status_get for it). To find a VM by name across the cluster, use proxmox_guests_find.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_qemu_list(
@@ -283,7 +283,7 @@ impl ProxmoxMcpServer {
     }
 
     #[tool(
-        description = "Get the configuration of a QEMU VM (current values plus pending changes).",
+        description = "Get a QEMU VM's configuration — its hardware and settings: cores, memory, disks, network, boot order (current values plus pending changes). Needs node + vmid; if you only have a name, call proxmox_guests_find first.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_qemu_config_get(
@@ -294,7 +294,7 @@ impl ProxmoxMcpServer {
     }
 
     #[tool(
-        description = "Get the current runtime status of a QEMU VM (running state, CPU, memory, uptime).",
+        description = "Get a QEMU VM's current runtime status: whether it's running, plus live CPU, memory, and uptime. Needs node + vmid; if you only have a name, call proxmox_guests_find first.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_qemu_status_get(
@@ -306,7 +306,7 @@ impl ProxmoxMcpServer {
 
     // ---- LXC containers ----
     #[tool(
-        description = "List LXC containers on a node.",
+        description = "List LXC containers (CTs) on a node. To find a container by name across the cluster, use proxmox_guests_find.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_lxc_list(
@@ -317,7 +317,7 @@ impl ProxmoxMcpServer {
     }
 
     #[tool(
-        description = "Get the configuration of an LXC container.",
+        description = "Get an LXC container's configuration — its resources and settings: cores, memory, rootfs/disks, network. Needs node + vmid; if you only have a name, call proxmox_guests_find first.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_lxc_config_get(
@@ -328,7 +328,7 @@ impl ProxmoxMcpServer {
     }
 
     #[tool(
-        description = "Get the current runtime status of an LXC container.",
+        description = "Get an LXC container's current runtime status: whether it's running, plus live CPU, memory, and uptime. Needs node + vmid; if you only have a name, call proxmox_guests_find first.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_lxc_status_get(
@@ -340,7 +340,7 @@ impl ProxmoxMcpServer {
 
     // ---- storage ----
     #[tool(
-        description = "Get status for all datastores on a node. Filters: content (e.g. images, iso, backup), enabled.",
+        description = "List storage (datastores) on a node — where VM disks, ISOs, and backups live — with capacity and free space. Use this for \"how much disk space is left\". Filters: content (e.g. images, iso, backup), enabled.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_storage_list(
@@ -351,7 +351,7 @@ impl ProxmoxMcpServer {
     }
 
     #[tool(
-        description = "List the content (disk images, ISOs, backups, templates) of one storage on a node. Filters: content type, vmid.",
+        description = "List what's stored on one storage on a node: VM disk images, ISOs, backups (vzdump), and container templates. Filter by content type, or by vmid to find a specific guest's disks/backups. Storage IDs come from proxmox_storage_list.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_storage_content_list(
