@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-06-21
+
 ### Added
 - `--debug` and `--log-file` flags for request tracing: `--debug` logs every
   Proxmox request (method + URL) and full, untruncated error bodies (sets
