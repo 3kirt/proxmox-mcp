@@ -2,6 +2,7 @@ use crate::client::{ProxmoxClient, ProxmoxError};
 use crate::config::Connection;
 use rmcp::{
     ErrorData as McpError, Peer, RoleServer, ServerHandler,
+    handler::server::router::tool::ToolRouter,
     handler::server::wrapper::Parameters,
     model::*,
     service::{NotificationContext, RequestContext},
@@ -45,6 +46,51 @@ pub fn encode_seg(s: &str) -> String {
         }
     }
     out
+}
+
+/// A Proxmox **node** name. This newtype exists so the parameter description —
+/// otherwise duplicated across six `*Params` structs — lives in exactly one
+/// place: its [`schemars::JsonSchema`] impl below. It is `#[serde(transparent)]`
+/// over a plain string (wire shape unchanged) and `Deref`s to `str`, so the
+/// existing `encode_seg(&p.node)` call sites keep working via deref coercion.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(transparent)]
+pub struct NodeId(String);
+
+impl std::ops::Deref for NodeId {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for NodeId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for NodeId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl schemars::JsonSchema for NodeId {
+    // Inline the schema at each use site so the description renders on the field
+    // itself rather than behind a `$ref`.
+    fn inline_schema() -> bool {
+        true
+    }
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "NodeId".into()
+    }
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "Cluster node name (see proxmox_nodes_list)"
+        })
+    }
 }
 
 /// Fluent builder for optional query parameters.
@@ -96,6 +142,43 @@ fn level_severity(level: LoggingLevel) -> u8 {
     }
 }
 
+/// Summarize a tool's accepted fields ("required first") from its JSON input
+/// schema, for echoing back on an invalid-params error. Returns `None` when the
+/// tool takes no parameters.
+fn expected_fields_summary(schema: &JsonObject) -> Option<String> {
+    let props = schema.get("properties")?.as_object()?;
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let (req, opt): (Vec<&String>, Vec<&String>) =
+        props.keys().partition(|k| required.contains(&k.as_str()));
+    let fields: Vec<String> = req
+        .into_iter()
+        .map(|k| format!("{k} (required)"))
+        .chain(opt.into_iter().cloned())
+        .collect();
+    if fields.is_empty() {
+        None
+    } else {
+        Some(fields.join(", "))
+    }
+}
+
+/// Append the tool's accepted fields to an invalid-params error so a caller that
+/// guessed a wrong or missing parameter name can self-correct from the error
+/// alone, without a separate schema lookup. A no-arg tool is left unchanged.
+fn enrich_invalid_params(error: McpError, tool: Option<&Tool>) -> McpError {
+    let Some(summary) = tool.and_then(|t| expected_fields_summary(&t.input_schema)) else {
+        return error;
+    };
+    McpError::invalid_params(
+        format!("{}. Expected fields: {}", error.message, summary),
+        error.data,
+    )
+}
+
 /// Run a domain function and convert the Result into an MCP response.
 macro_rules! respond {
     ($self:expr, $domain_fn:path, $p:expr, $noun:literal) => {{
@@ -114,6 +197,9 @@ macro_rules! respond {
 #[derive(Clone)]
 pub struct ProxmoxMcpServer {
     client: ProxmoxClient,
+    /// Held so the `call_tool` override can look up a tool's schema to enrich
+    /// invalid-params errors; reused per call rather than rebuilt each time.
+    tool_router: ToolRouter<ProxmoxMcpServer>,
     /// Set once the client connects (`on_initialized`/`set_level`); `None`
     /// before then, which makes `send_log` a no-op (e.g. in unit tests).
     peer: Arc<OnceLock<Peer<RoleServer>>>,
@@ -126,6 +212,7 @@ impl ProxmoxMcpServer {
     pub fn new(conn: Connection) -> anyhow::Result<Self> {
         Ok(Self {
             client: ProxmoxClient::new(conn)?,
+            tool_router: Self::tool_router(),
             peer: Arc::new(OnceLock::new()),
             log_level: Arc::new(Mutex::new(LoggingLevel::Warning)),
         })
@@ -369,7 +456,7 @@ impl ProxmoxMcpServer {
 #[tool_handler]
 impl ServerHandler for ProxmoxMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
+        let mut info = ServerInfo::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_logging()
@@ -378,11 +465,39 @@ impl ServerHandler for ProxmoxMcpServer {
         .with_server_info(Implementation::new(
             "proxmox-mcp",
             env!("CARGO_PKG_VERSION"),
-        ))
+        ));
+        info.instructions = Some(
+            "Read-only access to a Proxmox VE cluster (every tool is a GET; nothing is \
+             modified). Start with proxmox_cluster_resources_list for a one-call inventory of \
+             all VMs, containers, storage, and nodes. To inspect a guest you know only by name, \
+             first call proxmox_guests_find to resolve it to a node + vmid — the per-guest tools \
+             (proxmox_qemu_config_get / proxmox_qemu_status_get and their proxmox_lxc_* \
+             equivalents) require both. Epoch timestamp fields are returned alongside an ISO \
+             8601 <field>_iso sibling."
+                .to_string(),
+        );
+        info
     }
 
     async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
         let _ = self.peer.set(context.peer);
+    }
+
+    /// Dispatch via the stored router, then enrich any invalid-params error with
+    /// the tool's accepted fields so the caller can self-correct.
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let tool_name = request.name.clone();
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        match self.tool_router.call(tcc).await {
+            Err(e) if e.code == ErrorCode::INVALID_PARAMS => {
+                Err(enrich_invalid_params(e, self.tool_router.get(&tool_name)))
+            }
+            other => other,
+        }
     }
 
     async fn set_level(
@@ -434,6 +549,75 @@ mod tests {
         assert!(level_severity(LoggingLevel::Warning) < level_severity(LoggingLevel::Error));
         assert!(level_severity(LoggingLevel::Error) < level_severity(LoggingLevel::Critical));
         assert!(level_severity(LoggingLevel::Critical) < level_severity(LoggingLevel::Emergency));
+    }
+
+    #[test]
+    fn expected_fields_summary_lists_required_first() {
+        let router = ProxmoxMcpServer::tool_router();
+        let tool = router.get("proxmox_qemu_config_get").unwrap();
+        let summary = expected_fields_summary(&tool.input_schema).unwrap();
+        assert!(summary.contains("node (required)"), "{summary}");
+        assert!(summary.contains("vmid (required)"), "{summary}");
+    }
+
+    #[test]
+    fn enrich_invalid_params_appends_expected_fields() {
+        let router = ProxmoxMcpServer::tool_router();
+        let err = McpError::invalid_params(
+            "failed to deserialize parameters: missing field `vmid`",
+            None,
+        );
+        let enriched = enrich_invalid_params(err, router.get("proxmox_qemu_config_get"));
+        assert!(
+            enriched.message.contains("missing field `vmid`"),
+            "{}",
+            enriched.message
+        );
+        assert!(
+            enriched.message.contains("Expected fields: ")
+                && enriched.message.contains("node (required)"),
+            "{}",
+            enriched.message
+        );
+    }
+
+    #[test]
+    fn enrich_invalid_params_without_tool_keeps_error_unchanged() {
+        let err = McpError::invalid_params("failed to deserialize parameters", None);
+        let enriched = enrich_invalid_params(err, None);
+        assert_eq!(enriched.message, "failed to deserialize parameters");
+    }
+
+    #[test]
+    fn node_id_renders_description_inline() {
+        // The NodeId newtype carries the parameter description in one place;
+        // verify it reaches the per-tool input schema inline (not behind a
+        // `$ref`, which inline_schema() prevents) so LLM callers still see it.
+        let router = ProxmoxMcpServer::tool_router();
+        let tool = router.get("proxmox_nodes_status_get").unwrap();
+        let node = tool
+            .input_schema
+            .get("properties")
+            .unwrap()
+            .get("node")
+            .unwrap();
+        assert!(node.get("$ref").is_none(), "node must be inlined: {node}");
+        assert_eq!(node["type"], "string");
+        assert!(
+            node["description"]
+                .as_str()
+                .unwrap()
+                .contains("proxmox_nodes_list"),
+            "{node}"
+        );
+    }
+
+    #[test]
+    fn node_id_deserializes_transparently_from_string() {
+        // The wire contract is unchanged: a plain JSON string still deserializes
+        // into the newtype, and it derefs back to that string.
+        let p: nodes::NodeParams = serde_json::from_value(json!({ "node": "pve1" })).unwrap();
+        assert_eq!(&*p.node, "pve1");
     }
 
     // ------------------------------------------------------------------
@@ -496,7 +680,7 @@ mod tests {
 
         let client = mock_client(&server.uri());
         let p = nodes::NodeParams {
-            node: "pve1".to_string(),
+            node: "pve1".into(),
         };
         let raw = nodes::node_status(&client, p).await.unwrap();
         let result = slim_value(raw);
@@ -521,7 +705,7 @@ mod tests {
 
         let client = mock_client(&server.uri());
         let p = nodes::GuestParams {
-            node: "pve1".to_string(),
+            node: "pve1".into(),
             vmid: 100,
         };
         let result = nodes::qemu_config(&client, p).await.unwrap();
@@ -540,7 +724,7 @@ mod tests {
 
         let client = mock_client(&server.uri());
         let p = nodes::QemuListParams {
-            node: "pve1".to_string(),
+            node: "pve1".into(),
             full: Some(true),
         };
         // The bool is serialized to Proxmox's `1`; mismatch would 404 and fail.
@@ -559,7 +743,7 @@ mod tests {
 
         let client = mock_client(&server.uri());
         let p = nodes::StorageContentParams {
-            node: "pve1".to_string(),
+            node: "pve1".into(),
             storage: "local-zfs".to_string(),
             content: Some("images".to_string()),
             vmid: None,
@@ -603,7 +787,7 @@ mod tests {
 
         let client = mock_client(&server.uri());
         let p = nodes::QemuListParams {
-            node: "pve1".to_string(),
+            node: "pve1".into(),
             full: Some(true),
         };
         let result = nodes::qemu_list(&client, p).await.unwrap();
@@ -710,7 +894,7 @@ mod tests {
 
         let mcp = mock_server(&server.uri());
         let p = nodes::NodeParams {
-            node: "ghost".to_string(),
+            node: "ghost".into(),
         };
         // A failed API call surfaces as a tool error, not a transport-level Err.
         let result = mcp.proxmox_nodes_status_get(Parameters(p)).await.unwrap();

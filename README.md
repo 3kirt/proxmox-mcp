@@ -98,6 +98,11 @@ UNIX-epoch fields (`ctime`, `starttime`, `endtime`) are returned with an
   ```
 - **Every call fails with `no such file '/version'`.** The `url` is missing the
   `/api2/json` path — recent versions append it automatically; upgrade or add it.
+- **Diagnosing a failing call.** Run with `--debug` to log every Proxmox request
+  (method + URL) and the full, untruncated error body. Since an MCP client owns
+  the server's stdio, pass `--log-file <path>` to capture the trace to a file
+  (created `0600`; the API token is never logged). `RUST_LOG` overrides `--debug`
+  for finer control, e.g. `RUST_LOG=proxmox_mcp=trace`.
 
 ## Build & run
 

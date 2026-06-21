@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `--debug` and `--log-file` flags for request tracing: `--debug` logs every
+  Proxmox request (method + URL) and full, untruncated error bodies (sets
+  `proxmox_mcp=debug` unless `RUST_LOG` is set); `--log-file` routes the JSON
+  trace to a file — the reliable capture path when an MCP client owns stdio. The
+  API token is never logged, and the log file is created `0600` on Unix.
+- `initialize` now returns server instructions describing the read-only model
+  and the `proxmox_cluster_resources_list` → `proxmox_guests_find` →
+  per-guest-tool workflow.
+- Invalid-parameter errors now append the tool's accepted fields (required
+  first) so a caller that guessed a wrong/missing name can self-correct without
+  a schema round-trip.
+
+### Changed
+- Tool descriptions reworked for LLM discoverability: Proxmox jargon bridged to
+  common terms, sibling tools cross-referenced, and every per-guest tool points
+  at `proxmox_guests_find` for resolving a name to node + vmid.
+
+### Internal
+- `node` parameters use a `NodeId` newtype so the field description lives in one
+  place (was duplicated across six param structs).
+
 ## [0.5.0] — 2026-06-10
 
 ### Added

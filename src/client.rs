@@ -3,11 +3,16 @@ use std::time::Duration;
 use reqwest::{Client, StatusCode, header};
 use serde_json::Value;
 use thiserror::Error;
+use tracing::{debug, trace};
 
 use crate::config::Connection;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Tracing target for request/response logs; matches the `--debug` filter
+/// directive (`proxmox_mcp=debug`) set in `main`.
+const LOG_TARGET: &str = "proxmox_mcp";
 
 #[derive(Debug, Error)]
 pub enum ProxmoxError {
@@ -86,7 +91,16 @@ impl ProxmoxClient {
     /// `path` is the fully-interpolated API path, e.g. `/nodes/pve1/qemu`.
     pub async fn get(&self, path: &str, params: &[(&str, String)]) -> Result<Value, ProxmoxError> {
         let url = format!("{}{}", self.base_url, path);
-        let resp = self.http.get(&url).query(params).send().await?;
+        let builder = self.http.get(&url).query(params);
+        // Log the method + final URL (with query) once. Headers — and thus the
+        // PVEAPIToken — are never logged. The `enabled!` guard keeps the extra
+        // clone + build out of the hot path when debug logging is off.
+        if tracing::enabled!(target: LOG_TARGET, tracing::Level::DEBUG)
+            && let Some(req) = builder.try_clone().and_then(|b| b.build().ok())
+        {
+            debug!(target: LOG_TARGET, method = %req.method(), url = %req.url(), "proxmox request");
+        }
+        let resp = builder.send().await?;
         let body = self.handle_response(resp).await?;
 
         // Some endpoints (notably storage content) answer 200 with an empty
@@ -110,8 +124,12 @@ impl ProxmoxClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
+            // Log the full, untruncated error body — `to_tool_message()` clips
+            // it to 300 chars for the MCP client, but a debug trace wants it all.
+            debug!(target: LOG_TARGET, %status, body = %body, "proxmox error response");
             return Err(ProxmoxError::Api { status, body });
         }
+        trace!(target: LOG_TARGET, %status, "proxmox response");
         Ok(resp.json().await?)
     }
 }

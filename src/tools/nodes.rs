@@ -1,5 +1,5 @@
 use crate::client::{ProxmoxClient, ProxmoxError};
-use crate::tools::{QueryBuilder, encode_seg};
+use crate::tools::{NodeId, QueryBuilder, encode_seg};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -9,8 +9,7 @@ use serde_json::Value;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct NodeParams {
-    #[schemars(description = "Cluster node name (see proxmox_nodes_list)")]
-    pub node: String,
+    pub node: NodeId,
 }
 
 /// Read overall status (CPU, memory, uptime, kernel) of one node.
@@ -21,8 +20,7 @@ pub async fn node_status(client: &ProxmoxClient, p: NodeParams) -> Result<Value,
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct NodeTasksParams {
-    #[schemars(description = "Cluster node name")]
-    pub node: String,
+    pub node: NodeId,
     #[schemars(description = "Only list this number of tasks (default 50)")]
     pub limit: Option<i32>,
     #[schemars(description = "Only list tasks with an ERROR status")]
@@ -51,8 +49,7 @@ pub async fn node_tasks(client: &ProxmoxClient, p: NodeTasksParams) -> Result<Va
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct QemuListParams {
-    #[schemars(description = "Cluster node name")]
-    pub node: String,
+    pub node: NodeId,
     #[schemars(description = "Include full status of active VMs (slower)")]
     pub full: Option<bool>,
 }
@@ -79,8 +76,7 @@ pub async fn qemu_list(client: &ProxmoxClient, p: QemuListParams) -> Result<Valu
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GuestParams {
-    #[schemars(description = "Cluster node name")]
-    pub node: String,
+    pub node: NodeId,
     #[schemars(description = "Numeric guest ID (VMID)")]
     pub vmid: i64,
 }
@@ -133,8 +129,7 @@ pub async fn lxc_status(client: &ProxmoxClient, p: GuestParams) -> Result<Value,
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct StorageListParams {
-    #[schemars(description = "Cluster node name")]
-    pub node: String,
+    pub node: NodeId,
     #[schemars(
         description = "Only list stores supporting this content type (e.g. images, iso, backup)"
     )]
@@ -158,8 +153,7 @@ pub async fn storage_list(
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct StorageContentParams {
-    #[schemars(description = "Cluster node name")]
-    pub node: String,
+    pub node: NodeId,
     #[schemars(description = "Storage identifier (see proxmox_storage_list)")]
     pub storage: String,
     #[schemars(description = "Only list content of this type (e.g. images, iso, backup, vztmpl)")]
