@@ -178,3 +178,49 @@ pub async fn storage_content(
         .into_params();
     client.get(&path, &params).await
 }
+
+// --------------------------------------------------------------------------
+// Network
+// --------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NetworkListParams {
+    pub node: NodeId,
+    #[schemars(
+        description = "Only list interfaces of this type: bridge, bond, eth, alias, vlan, \
+                       OVSBridge, OVSBond, OVSPort, OVSIntPort, vnet, or any_bridge"
+    )]
+    pub r#type: Option<String>,
+}
+
+/// List the network interfaces, bridges, bonds, and VLANs configured on a node.
+pub async fn network_list(
+    client: &ProxmoxClient,
+    p: NetworkListParams,
+) -> Result<Value, ProxmoxError> {
+    let path = format!("/nodes/{}/network", encode_seg(&p.node));
+    let params = QueryBuilder::new().opt("type", p.r#type).into_params();
+    client.get(&path, &params).await
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NetworkInterfaceParams {
+    pub node: NodeId,
+    #[schemars(
+        description = "Network interface name (e.g. vmbr0, eth0; see proxmox_nodes_network_list)"
+    )]
+    pub iface: String,
+}
+
+/// Get the configuration of one network interface on a node.
+pub async fn network_get(
+    client: &ProxmoxClient,
+    p: NetworkInterfaceParams,
+) -> Result<Value, ProxmoxError> {
+    let path = format!(
+        "/nodes/{}/network/{}",
+        encode_seg(&p.node),
+        encode_seg(&p.iface)
+    );
+    client.get(&path, &[]).await
+}

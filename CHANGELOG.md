@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `proxmox_nodes_network_list` and `proxmox_nodes_network_get` — enumerate a
+  node's network interfaces, bridges, bonds, and VLANs (`/nodes/{node}/network`,
+  optional `type` filter) and read one interface's config
+  (`/nodes/{node}/network/{iface}`). Lets you discover available bridges (e.g.
+  for picking a VM network) without inspecting existing guest configs. (#3)
+
 ## [0.6.0] — 2026-06-21
 
 ### Added

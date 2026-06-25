@@ -75,6 +75,8 @@ pveum acl modify / -token 'monitoring@pve!mcp' -role PVEAuditor
 | `proxmox_lxc_status_get` | `/nodes/{node}/lxc/{vmid}/status/current` |
 | `proxmox_storage_list` | `/nodes/{node}/storage` |
 | `proxmox_storage_content_list` | `/nodes/{node}/storage/{storage}/content` |
+| `proxmox_nodes_network_list` | `/nodes/{node}/network` |
+| `proxmox_nodes_network_get` | `/nodes/{node}/network/{iface}` |
 
 `proxmox_cluster_resources_list` is the best starting point — it returns every VM,
 container, storage, and node across the cluster in a single call.

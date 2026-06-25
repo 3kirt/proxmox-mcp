@@ -447,6 +447,29 @@ impl ProxmoxMcpServer {
     ) -> Result<CallToolResult, McpError> {
         respond!(self, nodes::storage_content, p, "listing storage content")
     }
+
+    // ---- network ----
+    #[tool(
+        description = "List the network interfaces, bridges, bonds, and VLANs on a node. Use this to discover which bridges (e.g. vmbr0) are available — for example when choosing a network for a VM. Optional type filter: bridge, bond, eth, vlan, OVSBridge, etc.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn proxmox_nodes_network_list(
+        &self,
+        Parameters(p): Parameters<nodes::NetworkListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        respond!(self, nodes::network_list, p, "listing node network")
+    }
+
+    #[tool(
+        description = "Get the configuration of one network interface on a node (addressing, bridge ports, bond members, VLAN tag). Interface names come from proxmox_nodes_network_list.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn proxmox_nodes_network_get(
+        &self,
+        Parameters(p): Parameters<nodes::NetworkInterfaceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        respond!(self, nodes::network_get, p, "getting network interface")
+    }
 }
 
 // --------------------------------------------------------------------------
@@ -749,6 +772,49 @@ mod tests {
             vmid: None,
         };
         assert!(nodes::storage_content(&client, p).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn pipeline_network_list_passes_type_filter() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/nodes/pve1/network"))
+            .and(query_param("type", "bridge"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{ "iface": "vmbr0", "type": "bridge", "comments": null }]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let p = nodes::NetworkListParams {
+            node: "pve1".into(),
+            r#type: Some("bridge".to_string()),
+        };
+        let result = slim_value(nodes::network_list(&client, p).await.unwrap());
+        assert_eq!(result[0]["iface"], json!("vmbr0"));
+        assert_no_nulls(&result, "root");
+    }
+
+    #[tokio::test]
+    async fn pipeline_network_get_interpolates_iface() {
+        let server = MockServer::start().await;
+        // Mounted on the exact interpolated path; a wrong path 404s and unwrap fails.
+        Mock::given(method("GET"))
+            .and(path("/nodes/pve1/network/vmbr0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "iface": "vmbr0", "type": "bridge", "bridge_ports": "eth0" }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let p = nodes::NetworkInterfaceParams {
+            node: "pve1".into(),
+            iface: "vmbr0".to_string(),
+        };
+        let result = nodes::network_get(&client, p).await.unwrap();
+        assert_eq!(result["bridge_ports"], json!("eth0"));
     }
 
     #[tokio::test]
