@@ -9,12 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-06-25
+
 ### Added
 - `proxmox_nodes_network_list` and `proxmox_nodes_network_get` — enumerate a
   node's network interfaces, bridges, bonds, and VLANs (`/nodes/{node}/network`,
   optional `type` filter) and read one interface's config
   (`/nodes/{node}/network/{iface}`). Lets you discover available bridges (e.g.
   for picking a VM network) without inspecting existing guest configs. (#3)
+
+### Security
+- Updated `quinn-proto` to 0.11.15, resolving RUSTSEC-2026-0185 (high-severity
+  remote memory exhaustion; pulled in transitively via `reqwest`). Also bumped
+  `anyhow` to 1.0.103. `rmcp` is held at 1.7 for now: 1.8 deprecates the MCP
+  logging capability (SEP-2577) this server uses, to be migrated separately.
 
 ## [0.6.0] — 2026-06-21
 
