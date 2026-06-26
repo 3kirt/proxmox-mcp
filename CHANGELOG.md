@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **MCP logging capability** — the server no longer advertises `logging`, sends
+  `notifications/message` log entries, or handles `logging/setLevel`. MCP's
+  Logging feature was deprecated by [SEP-2577](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2577);
+  the per-tool-error notification it sent was redundant with the error already
+  returned in the tool result.
+
+### Changed
+- **rmcp 1.7 → 1.8**, which marks the Logging APIs deprecated (prompting the
+  removal above).
+- Tool errors are now logged via `tracing::error!` (operator-facing, through the
+  existing `--debug` / `--log-file` pipeline) instead of being pushed to the
+  client over the MCP logging channel. The error is still returned in-band as
+  the tool result, so MCP clients see no change.
+
 ## [0.7.0] — 2026-06-25
 
 ### Added
