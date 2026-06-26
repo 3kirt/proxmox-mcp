@@ -1,6 +1,6 @@
 [package]
 name = "proxmox-mcp"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 description = "A read-only MCP server that exposes Proxmox VE data as tools for Claude and other MCP clients"
 license = "GPL-3.0"
