@@ -65,7 +65,7 @@ pub async fn cluster_tasks(
         });
     }
 
-    let limit = p.limit.unwrap_or(50).max(0) as usize;
+    let limit = usize::try_from(p.limit.unwrap_or(50)).unwrap_or(0);
     tasks.truncate(limit);
     Ok(Value::Array(tasks))
 }

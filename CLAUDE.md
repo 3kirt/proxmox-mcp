@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```sh
 make build       # cargo build --release
 make test        # cargo test --all
-make lint        # cargo clippy -- -D warnings && cargo fmt --check
+make lint        # cargo clippy --all-targets -D warnings && cargo fmt --check
 make install     # cargo install --path . (installs to ~/.cargo/bin)
 make clean       # remove build artifacts
 
@@ -15,7 +15,13 @@ cargo test <test_name>   # run a single test
 ```
 
 Formatting and lint must be clean before every commit: `cargo fmt`, then
-`cargo clippy -- -D warnings`.
+`cargo clippy --all-targets -- -D warnings`.
+
+Clippy runs at **pedantic** strictness: the `pedantic`, `nursery`, and `cargo`
+lint groups are enabled in `Cargo.toml` under `[lints.clippy]`, with a curated,
+commented allow-list for the intentional/unfixable ones (`multiple_crate_versions`,
+`doc_markdown`, `wildcard_imports`, `struct_field_names`). New warnings must be
+fixed, not silenced, unless they belong in that list.
 
 ## Architecture
 
@@ -46,7 +52,7 @@ src/
 ## Adding a tool
 
 1. Add a `*Params` struct (schemars-described) + an async domain fn in `tools/cluster.rs` or `tools/nodes.rs` that builds the path/query and calls `client.get`.
-2. Add a `#[tool(... annotations(read_only_hint = true, open_world_hint = false))]` shim in `tools/mod.rs` using the `respond!` macro (or `get_simple` for fixed zero-param paths).
+2. Add a `#[tool(... annotations(read_only_hint = true, open_world_hint = false))]` shim in `tools/mod.rs` using the `respond!` macro (or `get_simple` for fixed zero-param paths). The `annotations(...)` is mandatory — the `every_tool_is_annotated_read_only` test fails closed if a new tool omits it or ships a write-capable hint.
 3. No routing table to update — `#[tool_router]` handles registration.
 
 The full Proxmox API schema is at `~/source/repos/pve-docs/api-viewer/apidata.js`

@@ -40,7 +40,7 @@ impl Config {
         };
 
         if !resolved.exists() {
-            return Ok(Config {
+            return Ok(Self {
                 file_url: None,
                 file_token: None,
                 file_insecure: None,
@@ -54,7 +54,7 @@ impl Config {
         let raw: RawConfig = serde_json::from_str(&contents)
             .with_context(|| format!("parsing config file {}", resolved.display()))?;
 
-        Ok(Config {
+        Ok(Self {
             file_url: raw.url,
             file_token: raw.token,
             file_insecure: raw.insecure,
@@ -83,10 +83,8 @@ impl Config {
                 )
             })?;
 
-        let insecure = match std::env::var("PROXMOX_INSECURE") {
-            Ok(v) => parse_bool(&v),
-            Err(_) => self.file_insecure.unwrap_or(false),
-        };
+        let insecure = std::env::var("PROXMOX_INSECURE")
+            .map_or_else(|_| self.file_insecure.unwrap_or(false), |v| parse_bool(&v));
 
         Ok(Connection {
             url,
@@ -150,9 +148,8 @@ fn enforce_https(url: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     bail!(
-        "Proxmox URL must use HTTPS, got: {}  \
-         (use https://; for self-signed certs set \"insecure\": true instead)",
-        url
+        "Proxmox URL must use HTTPS, got: {url}  \
+         (use https://; for self-signed certs set \"insecure\": true instead)"
     );
 }
 
@@ -169,7 +166,9 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn lock_env() -> MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn clear_env() {

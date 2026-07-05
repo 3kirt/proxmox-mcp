@@ -21,11 +21,32 @@ pub fn json_result(v: Value) -> Result<CallToolResult, McpError> {
     let v = slim_value(humanize_value(v));
     let text = serde_json::to_string_pretty(&v)
         .map_err(|e| McpError::internal_error(format!("marshalling response: {e}"), None))?;
-    Ok(CallToolResult::success(vec![Content::text(text)]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
 }
 
+// Mirrors `json_result`'s fallible signature so both arms of `respond` share one
+// `Result<CallToolResult, McpError>` shape; the error variant is infallible here.
+#[allow(clippy::unnecessary_wraps)]
 pub fn tool_error(msg: &str) -> Result<CallToolResult, McpError> {
-    Ok(CallToolResult::error(vec![Content::text(msg)]))
+    Ok(CallToolResult::error(vec![ContentBlock::text(msg)]))
+}
+
+/// Convert a domain-call result into an MCP response: the payload on success, or
+/// a `"{noun}: {error}"` tool error on failure. The error is also logged via
+/// `tracing` (operator-facing, through the `--debug` / `--log-file` pipeline); it
+/// is still returned in-band as the tool result.
+pub fn respond(
+    result: Result<Value, ProxmoxError>,
+    noun: &str,
+) -> Result<CallToolResult, McpError> {
+    match result {
+        Ok(v) => json_result(v),
+        Err(e) => {
+            let msg = format!("{noun}: {}", e.to_tool_message());
+            tracing::error!("{msg}");
+            tool_error(&msg)
+        }
+    }
 }
 
 /// Percent-encode a single URL path segment. Encodes everything except the
@@ -36,9 +57,12 @@ pub fn encode_seg(s: &str) -> String {
     for &b in s.as_bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(b as char)
+                out.push(b as char);
             }
-            _ => out.push_str(&format!("%{b:02X}")),
+            _ => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "%{b:02X}");
+            }
         }
     }
     out
@@ -95,7 +119,7 @@ pub struct QueryBuilder {
 }
 
 impl QueryBuilder {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { params: vec![] }
     }
 
@@ -109,7 +133,7 @@ impl QueryBuilder {
 
     /// Append a boolean flag as Proxmox's `1`/`0` if `v` is Some.
     pub fn flag(self, key: &'static str, v: Option<bool>) -> Self {
-        self.opt(key, v.map(|b| b as i32))
+        self.opt(key, v.map(i32::from))
     }
 
     pub fn into_params(self) -> Vec<(&'static str, String)> {
@@ -164,7 +188,7 @@ fn enrich_invalid_params(error: McpError, tool: Option<&Tool>) -> McpError {
 macro_rules! respond {
     ($self:expr, $domain_fn:path, $p:expr, $noun:literal) => {{
         let client = $self.get_client();
-        $self.respond($domain_fn(client, $p).await, $noun).await
+        $crate::tools::respond($domain_fn(client, $p).await, $noun)
     }};
 }
 
@@ -178,7 +202,7 @@ pub struct ProxmoxMcpServer {
     client: ProxmoxClient,
     /// Held so the `call_tool` override can look up a tool's schema to enrich
     /// invalid-params errors; reused per call rather than rebuilt each time.
-    tool_router: ToolRouter<ProxmoxMcpServer>,
+    tool_router: ToolRouter<Self>,
 }
 
 impl ProxmoxMcpServer {
@@ -189,32 +213,13 @@ impl ProxmoxMcpServer {
         })
     }
 
-    fn get_client(&self) -> &ProxmoxClient {
+    const fn get_client(&self) -> &ProxmoxClient {
         &self.client
-    }
-
-    /// Convert a domain-call result into an MCP response: the payload on
-    /// success, or a `"{noun}: {error}"` tool error on failure. The error is
-    /// also logged via `tracing` (operator-facing, through the `--debug` /
-    /// `--log-file` pipeline); it is still returned in-band as the tool result.
-    async fn respond(
-        &self,
-        result: Result<Value, ProxmoxError>,
-        noun: &str,
-    ) -> Result<CallToolResult, McpError> {
-        match result {
-            Ok(v) => json_result(v),
-            Err(e) => {
-                let msg = format!("{noun}: {}", e.to_tool_message());
-                tracing::error!("{msg}");
-                tool_error(&msg)
-            }
-        }
     }
 
     /// Shared body for the zero-parameter "GET this fixed path" tools.
     async fn get_simple(&self, path: &str, noun: &str) -> Result<CallToolResult, McpError> {
-        self.respond(self.client.get(path, &[]).await, noun).await
+        respond(self.client.get(path, &[]).await, noun)
     }
 }
 
@@ -471,6 +476,33 @@ impl ServerHandler for ProxmoxMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_tool_is_annotated_read_only() {
+        // This server wraps only Proxmox GET endpoints, so every tool must
+        // advertise the read-only behavior hints (readOnlyHint = true,
+        // openWorldHint = false) that let MCP clients auto-approve them. Fail
+        // closed: a newly added tool whose `#[tool]` omits `annotations(...)`,
+        // or that ships a write-capable hint, trips this.
+        for tool in ProxmoxMcpServer::tool_router().list_all() {
+            let ann = tool
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} is missing tool annotations", tool.name));
+            assert_eq!(
+                ann.read_only_hint,
+                Some(true),
+                "{} must declare read_only_hint = true",
+                tool.name
+            );
+            assert_eq!(
+                ann.open_world_hint,
+                Some(false),
+                "{} must declare open_world_hint = false",
+                tool.name
+            );
+        }
+    }
 
     #[test]
     fn encode_seg_passes_unreserved() {

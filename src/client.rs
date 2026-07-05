@@ -33,12 +33,8 @@ impl ProxmoxError {
     /// responses don't blow up the assistant's context window.
     pub fn to_tool_message(&self) -> String {
         match self {
-            ProxmoxError::Api { status, body } => {
-                let cut = body
-                    .char_indices()
-                    .nth(300)
-                    .map(|(i, _)| i)
-                    .unwrap_or(body.len());
+            Self::Api { status, body } => {
+                let cut = body.char_indices().nth(300).map_or(body.len(), |(i, _)| i);
                 if cut < body.len() {
                     format!("Proxmox API error {status}: {}… (truncated)", &body[..cut])
                 } else {
@@ -63,8 +59,13 @@ pub struct ProxmoxClient {
 
 impl ProxmoxClient {
     pub fn new(conn: Connection) -> anyhow::Result<Self> {
+        let Connection {
+            url,
+            token,
+            insecure,
+        } = conn;
         // Proxmox uses "PVEAPIToken=USER@REALM!TOKENID=UUID", not "Bearer".
-        let auth = format!("PVEAPIToken={}", conn.token);
+        let auth = format!("PVEAPIToken={token}");
         let auth_value = header::HeaderValue::from_str(&auth).map_err(|_| {
             anyhow::anyhow!(
                 "Proxmox token contains characters not valid in HTTP headers (must be visible ASCII)"
@@ -78,12 +79,12 @@ impl ProxmoxClient {
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .default_headers(headers)
-            .danger_accept_invalid_certs(conn.insecure)
+            .danger_accept_invalid_certs(insecure)
             .build()?;
 
-        Ok(ProxmoxClient {
+        Ok(Self {
             http,
-            base_url: conn.url.trim_end_matches('/').to_string(),
+            base_url: url.trim_end_matches('/').to_string(),
         })
     }
 
