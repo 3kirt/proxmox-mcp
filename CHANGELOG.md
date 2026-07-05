@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-07-04
+
+Upgrade to rmcp 2.x and tighten the lint gate.
+
+### Added
+- **Read-only annotation guard test** — `every_tool_is_annotated_read_only`
+  asserts every registered tool declares `readOnlyHint = true` and
+  `openWorldHint = false`. Fail-closed: a newly added tool whose `#[tool]` omits
+  `annotations(...)`, or that ships a write-capable hint, trips the test.
+
+### Changed
+- **rmcp 1.8 → 2.1** (major). The only 2.x break that touched this crate is the
+  `model::Content` → `ContentBlock` rename (`json_result` / `tool_error`);
+  `ProgressNotificationParam` is unused here, so the other 2.x migration point
+  does not apply.
+- **Clippy runs at pedantic strictness** — the `pedantic`, `nursery`, and `cargo`
+  lint groups are enabled in `Cargo.toml` under `[lints.clippy]`, so every clippy
+  run (CI, rust-analyzer, and the release gate) enforces them. A curated,
+  commented allow-list covers the intentional/unfixable lints
+  (`multiple_crate_versions`, `doc_markdown`, `wildcard_imports`,
+  `struct_field_names`). Added package `keywords`/`categories` metadata and
+  strengthened `make lint` to run `--all-targets`.
+
 ## [0.8.0] — 2026-06-25
 
 ### Removed
