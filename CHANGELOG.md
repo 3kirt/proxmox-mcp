@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-08-06
+
+Upgrade to rmcp 3.x.
+
+### Changed
+- **rmcp 2.1 → 3.1** (major). `ServerHandler::call_tool` now returns the
+  MRTR-aware `CallToolResponse` enum instead of the bare `CallToolResult`; the
+  overridden dispatch in `tools/mod.rs` was updated accordingly. Also picks up
+  rmcp 3.1.1's handler-macro fix that stamps a `ttl_ms`/`cache_scope`
+  (SEP-2549) hint on the macro-generated `list_tools` response — free for this
+  server, since it never overrides `list_tools` itself.
+- Routine dependency refresh: `anyhow`, `clap`, `schemars`, `serde`,
+  `serde_json`, `thiserror`, and `tokio` bumped to their latest in-range patch
+  versions.
+
 ## [0.9.0] — 2026-07-04
 
 Upgrade to rmcp 2.x and tighten the lint gate.
