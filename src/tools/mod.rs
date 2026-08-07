@@ -461,7 +461,7 @@ impl ServerHandler for ProxmoxMcpServer {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         let tool_name = request.name.clone();
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         match self.tool_router.call(tcc).await {
