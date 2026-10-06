@@ -1093,6 +1093,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "futures",
  "reqwest",
  "rmcp",
  "schemars",
@@ -1103,7 +1104,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "url",
  "wiremock",
 ]
 

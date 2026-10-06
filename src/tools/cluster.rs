@@ -1,5 +1,5 @@
 use crate::client::{ProxmoxClient, ProxmoxError};
-use crate::tools::QueryBuilder;
+use crate::tools::params::QueryBuilder;
 use serde::Deserialize;
 use serde_json::Value;
 

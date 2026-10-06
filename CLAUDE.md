@@ -20,7 +20,7 @@ Formatting and lint must be clean before every commit: `cargo fmt`, then
 Clippy runs at **pedantic** strictness: the `pedantic`, `nursery`, and `cargo`
 lint groups are enabled in `Cargo.toml` under `[lints.clippy]`, with a curated,
 commented allow-list for the intentional/unfixable ones (`multiple_crate_versions`,
-`doc_markdown`, `wildcard_imports`, `struct_field_names`). New warnings must be
+`doc_markdown`, `wildcard_imports`). New warnings must be
 fixed, not silenced, unless they belong in that list.
 
 ## Architecture
@@ -34,11 +34,11 @@ src/
   config.rs        — Config::load(~/.proxmox_mcp.json) + env override → Clusters{default, name → Connection}
   client.rs        — reqwest wrapper; get(path,params) -> unwrapped `data` Value; ProxmoxError
   tools/
-    mod.rs         — ProxmoxMcpServer (one client per cluster), QueryBuilder, encode_seg(), json_result(), #[tool] shims, ServerHandler
-    scope.rs       — Scoped<P>/AnyScoped<P>: flatten the optional `cluster` arg beside domain params
+    mod.rs         — ProxmoxMcpServer (one client per cluster), scoped()/any_scoped() call helpers, #[tool] shims, ServerHandler
+    params.rs      — string_param! types (NodeId, Upid, ClusterId…), Scoped<P>/AnyScoped<P> cluster wrappers, QueryBuilder, encode_seg()
     slim.rs        — slim_value(): drops null fields recursively
     cluster.rs     — cluster-scoped domain fns + param structs
-    nodes.rs       — node/qemu/lxc/storage domain fns + param structs
+    nodes.rs       — node/qemu/storage/disk/task domain fns + param structs
 ```
 
 ## Proxmox API specifics (differ from a typical REST API)
@@ -53,17 +53,19 @@ src/
 ## Adding a tool
 
 1. Add a `*Params` struct (schemars-described) + an async domain fn in `tools/cluster.rs` or `tools/nodes.rs` that builds the path/query and calls `client.get`.
-2. Add a `#[tool(... annotations(read_only_hint = true, open_world_hint = false))]` shim in `tools/mod.rs` taking `Parameters<Scoped<YourParams>>` and using the `respond!` macro (or `get_simple` with `Scoped<NoParams>` for fixed zero-param paths). Domain fns never see `cluster`; the shim resolves it to a client. Use `AnyScoped` + `respond_any!` only for cluster-wide list tools whose results make sense merged across clusters (`cluster: "*"`). The `annotations(...)` is mandatory — the `every_tool_is_annotated_read_only` test fails closed if a new tool omits it or ships a write-capable hint.
+2. Add a `#[tool(... annotations(read_only_hint = true, open_world_hint = false))]` shim in `tools/mod.rs` taking `Parameters<Scoped<YourParams>>` whose body is `self.scoped(p, "doing x", nodes::your_fn).await` (or `get_simple` with `Scoped<NoParams>` for fixed zero-param paths). Domain fns never see `cluster`; `scoped` resolves it to a client. Use `AnyScoped` + `any_scoped` only for cluster-wide list tools whose results make sense merged across clusters (`cluster: "*"`). A string argument that needs a shared description or validation gets a `string_param!` type in `tools/params.rs`. The `annotations(...)` is mandatory — the `every_tool_is_annotated_read_only` test fails closed if a new tool omits it or ships a write-capable hint.
 3. No routing table to update — `#[tool_router]` handles registration.
 
 The full Proxmox API schema is at `~/source/repos/pve-docs/api-viewer/apidata.js`
-(a JSON tree; `apiSchema = [...]`). 340 GET endpoints exist; exclude `*/rrd`
+(a JSON tree; `apiSchema = [...]`). 342 GET endpoints exist (PVE 9.2.13); exclude `*/rrd`
 (PNG), `*/vncwebsocket`/`mtunnelwebsocket` (websockets), and `qemu/*/agent/*`
 (executes guest-agent commands) from the read-only set.
 
 ## Testing
 
-Unit tests live beside the code: `config.rs` (loading, env override, HTTPS),
-`client.rs` (`unwrap_data`, error truncation), `tools/slim.rs` (`slim_value`),
-`tools/mod.rs` (`encode_seg`, `QueryBuilder`). `wiremock` is available for
-HTTP-pipeline tests.
+Unit tests live beside the code: `config.rs` (loading, clusters, env override,
+HTTPS), `client.rs` (envelope handling, error truncation), `tools/slim.rs`,
+`tools/params.rs` (`encode_seg`, `QueryBuilder`, UPID parsing), and
+`tools/mod.rs` (tool schemas, domain fns and tool calls against a `wiremock`
+Proxmox). In `mod.rs` tests, use `mount_data`/`mount_failure` for mocks and
+build params from JSON with `params(json!(..))` / `args(json!(..))`.

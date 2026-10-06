@@ -108,9 +108,6 @@ pveum acl modify / -token 'monitoring@pve!mcp' -role PVEAuditor
 | `proxmox_qemu_list` | `/nodes/{node}/qemu` |
 | `proxmox_qemu_config_get` | `/nodes/{node}/qemu/{vmid}/config` |
 | `proxmox_qemu_status_get` | `/nodes/{node}/qemu/{vmid}/status/current` |
-| `proxmox_lxc_list` | `/nodes/{node}/lxc` |
-| `proxmox_lxc_config_get` | `/nodes/{node}/lxc/{vmid}/config` |
-| `proxmox_lxc_status_get` | `/nodes/{node}/lxc/{vmid}/status/current` |
 | `proxmox_storage_list` | `/nodes/{node}/storage` |
 | `proxmox_storage_content_list` | `/nodes/{node}/storage/{storage}/content` |
 | `proxmox_nodes_network_list` | `/nodes/{node}/network` |

@@ -102,7 +102,7 @@ impl ProxmoxClient {
             debug!(target: LOG_TARGET, method = %req.method(), url = %req.url(), "proxmox request");
         }
         let resp = builder.send().await?;
-        let body = self.handle_response(resp).await?;
+        let body = handle_response(resp).await?;
 
         // Some endpoints (notably storage content) answer 200 with an empty
         // `data` array *and* a non-empty `errors` map describing a partial
@@ -113,47 +113,36 @@ impl ProxmoxClient {
         // (`/cluster/resources`, `/cluster/tasks`) also use `errors` to report
         // per-item failures while still returning useful data for everything
         // else, and we must not discard that good data over one bad item.
-        if data_is_empty(&body)
-            && let Some(errors) = body.get("errors").filter(|e| !is_errors_empty(e))
+        if body.get("data").is_none_or(is_blank)
+            && let Some(errors) = body.get("errors").filter(|e| !is_blank(e))
         {
             return Err(ProxmoxError::Partial(errors.to_string()));
         }
         Ok(unwrap_data(body))
     }
-
-    async fn handle_response(&self, resp: reqwest::Response) -> Result<Value, ProxmoxError> {
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            // Log the full, untruncated error body — `to_tool_message()` clips
-            // it to 300 chars for the MCP client, but a debug trace wants it all.
-            debug!(target: LOG_TARGET, %status, body = %body, "proxmox error response");
-            return Err(ProxmoxError::Api { status, body });
-        }
-        trace!(target: LOG_TARGET, %status, "proxmox response");
-        Ok(resp.json().await?)
-    }
 }
 
-/// Whether the envelope's `data` carries no useful payload (absent, `null`, or
-/// an empty array/object). Used to decide whether a non-empty `errors` map
-/// represents a total failure worth surfacing or merely a partial one.
-fn data_is_empty(body: &Value) -> bool {
-    match body.get("data") {
-        None | Some(Value::Null) => true,
-        Some(Value::Array(a)) => a.is_empty(),
-        Some(Value::Object(m)) => m.is_empty(),
-        _ => false,
+async fn handle_response(resp: reqwest::Response) -> Result<Value, ProxmoxError> {
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        // Log the full, untruncated error body — `to_tool_message()` clips
+        // it to 300 chars for the MCP client, but a debug trace wants it all.
+        debug!(target: LOG_TARGET, %status, body = %body, "proxmox error response");
+        return Err(ProxmoxError::Api { status, body });
     }
+    trace!(target: LOG_TARGET, %status, "proxmox response");
+    Ok(resp.json().await?)
 }
 
-/// Whether an envelope `errors` value carries no actual error. Proxmox may
-/// include the key as `null`, an empty object, or an empty array on success.
-fn is_errors_empty(v: &Value) -> bool {
+/// Whether a value carries nothing: `null`, or an empty array, object, or
+/// string. Proxmox uses all of these for an absent `data` payload or `errors`
+/// map, so an `errors` value counts only when it is not blank.
+fn is_blank(v: &Value) -> bool {
     match v {
         Value::Null => true,
-        Value::Object(m) => m.is_empty(),
         Value::Array(a) => a.is_empty(),
+        Value::Object(m) => m.is_empty(),
         Value::String(s) => s.is_empty(),
         _ => false,
     }
@@ -170,22 +159,23 @@ fn unwrap_data(v: Value) -> Value {
     }
 }
 
+/// A client for a mock server, authenticating as `root@pam!mcp=secret`.
+#[cfg(test)]
+pub fn mock_client(uri: &str) -> ProxmoxClient {
+    ProxmoxClient::new(Connection {
+        url: uri.to_string(),
+        token: "root@pam!mcp=secret".to_string(),
+        insecure: false,
+    })
+    .unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Connection;
     use serde_json::json;
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    fn mock_client(uri: &str) -> ProxmoxClient {
-        ProxmoxClient::new(Connection {
-            url: uri.to_string(),
-            token: "root@pam!mcp=secret".to_string(),
-            insecure: false,
-        })
-        .unwrap()
-    }
 
     #[tokio::test]
     async fn get_unwraps_data_envelope() {
@@ -318,13 +308,14 @@ mod tests {
     }
 
     #[test]
-    fn is_errors_empty_classifies_envelope_shapes() {
-        assert!(is_errors_empty(&json!(null)));
-        assert!(is_errors_empty(&json!({})));
-        assert!(is_errors_empty(&json!([])));
-        assert!(is_errors_empty(&json!("")));
-        assert!(!is_errors_empty(&json!({ "store": "denied" })));
-        assert!(!is_errors_empty(&json!(["denied"])));
+    fn is_blank_classifies_envelope_shapes() {
+        assert!(is_blank(&json!(null)));
+        assert!(is_blank(&json!({})));
+        assert!(is_blank(&json!([])));
+        assert!(is_blank(&json!("")));
+        assert!(!is_blank(&json!({ "store": "denied" })));
+        assert!(!is_blank(&json!(["denied"])));
+        assert!(!is_blank(&json!(0)));
     }
 
     #[test]

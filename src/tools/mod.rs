@@ -10,203 +10,28 @@ use rmcp::{
     tool_router,
 };
 use serde_json::{Value, json};
-use tokio::task::JoinHandle;
 
 mod slim;
 use slim::{humanize_value, slim_value};
 
 pub mod cluster;
 pub mod nodes;
-pub mod scope;
-use scope::{ALL_CLUSTERS, AnyScoped, NoParams, Scoped};
+pub mod params;
+use params::{ALL_CLUSTERS, AnyScoped, NoParams, Scoped};
 
 // --------------------------------------------------------------------------
 // Shared helpers
 // --------------------------------------------------------------------------
 
-pub fn json_result(v: Value) -> Result<CallToolResult, McpError> {
+fn json_result(v: Value) -> Result<CallToolResult, McpError> {
     let v = slim_value(humanize_value(v));
     let text = serde_json::to_string_pretty(&v)
         .map_err(|e| McpError::internal_error(format!("marshalling response: {e}"), None))?;
     Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
 }
 
-// Mirrors `json_result`'s fallible signature so both arms of `respond` share one
-// `Result<CallToolResult, McpError>` shape; the error variant is infallible here.
-#[allow(clippy::unnecessary_wraps)]
-pub fn tool_error(msg: &str) -> Result<CallToolResult, McpError> {
-    Ok(CallToolResult::error(vec![ContentBlock::text(msg)]))
-}
-
-/// Convert a domain-call result into an MCP response: the payload on success, or
-/// a `"{noun}: {error}"` tool error on failure. The error is also logged via
-/// `tracing` (operator-facing, through the `--debug` / `--log-file` pipeline); it
-/// is still returned in-band as the tool result.
-pub fn respond(
-    result: Result<Value, ProxmoxError>,
-    noun: &str,
-) -> Result<CallToolResult, McpError> {
-    match result {
-        Ok(v) => json_result(v),
-        Err(e) => {
-            let msg = format!("{noun}: {}", e.to_tool_message());
-            tracing::error!("{msg}");
-            tool_error(&msg)
-        }
-    }
-}
-
-/// Percent-encode a single URL path segment. Encodes everything except the
-/// RFC 3986 unreserved set, so user-supplied node/storage names cannot inject
-/// extra path components (`/`, `..`) or break the request URL.
-pub fn encode_seg(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for &b in s.as_bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(b as char);
-            }
-            _ => {
-                use std::fmt::Write as _;
-                let _ = write!(out, "%{b:02X}");
-            }
-        }
-    }
-    out
-}
-
-/// A Proxmox **node** name. This newtype exists so the parameter description —
-/// otherwise duplicated across six `*Params` structs — lives in exactly one
-/// place: its [`schemars::JsonSchema`] impl below. It is `#[serde(transparent)]`
-/// over a plain string (wire shape unchanged) and `Deref`s to `str`, so the
-/// existing `encode_seg(&p.node)` call sites keep working via deref coercion.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(transparent)]
-pub struct NodeId(String);
-
-impl std::ops::Deref for NodeId {
-    type Target = str;
-    fn deref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<String> for NodeId {
-    fn from(s: String) -> Self {
-        Self(s)
-    }
-}
-
-impl From<&str> for NodeId {
-    fn from(s: &str) -> Self {
-        Self(s.to_string())
-    }
-}
-
-impl schemars::JsonSchema for NodeId {
-    // Inline the schema at each use site so the description renders on the field
-    // itself rather than behind a `$ref`.
-    fn inline_schema() -> bool {
-        true
-    }
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "NodeId".into()
-    }
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({
-            "type": "string",
-            "description": "Cluster node name (see proxmox_nodes_list)"
-        })
-    }
-}
-
-/// A Proxmox task ID (`UPID:{node}:{pid}:{pstart}:{starttime}:{type}:{id}:{user}:`).
-/// Validated on deserialization so a malformed ID is an invalid-params error,
-/// and it carries its own node, so task tools need no separate `node` argument.
-#[derive(Debug, Clone)]
-pub struct Upid(String);
-
-impl Upid {
-    fn parse(s: String) -> Result<Self, String> {
-        let mut parts = s.split(':');
-        let is_upid = parts.next() == Some("UPID");
-        let has_node = parts.next().is_some_and(|n| !n.is_empty());
-        if is_upid && has_node {
-            Ok(Self(s))
-        } else {
-            Err(format!(
-                "invalid task UPID {s:?}: expected UPID:<node>:... as returned by \
-                 proxmox_cluster_tasks_list / proxmox_nodes_tasks_list"
-            ))
-        }
-    }
-
-    /// The node that ran the task (the UPID's second field).
-    pub fn node(&self) -> &str {
-        self.0.split(':').nth(1).unwrap_or_default()
-    }
-}
-
-impl std::ops::Deref for Upid {
-    type Target = str;
-    fn deref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for Upid {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Self::parse(String::deserialize(d)?).map_err(serde::de::Error::custom)
-    }
-}
-
-impl schemars::JsonSchema for Upid {
-    fn inline_schema() -> bool {
-        true
-    }
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "Upid".into()
-    }
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({
-            "type": "string",
-            "description": "Task ID (UPID), e.g. UPID:pve1:0000ABCD:...:vzdump:100:root@pam: — the `upid` field from proxmox_cluster_tasks_list or proxmox_nodes_tasks_list"
-        })
-    }
-}
-
-/// Fluent builder for optional query parameters.
-pub struct QueryBuilder {
-    params: Vec<(&'static str, String)>,
-}
-
-impl QueryBuilder {
-    pub const fn new() -> Self {
-        Self { params: vec![] }
-    }
-
-    /// Append `(key, v.to_string())` if `v` is Some.
-    pub fn opt<T: ToString>(mut self, key: &'static str, v: Option<T>) -> Self {
-        if let Some(v) = v {
-            self.params.push((key, v.to_string()));
-        }
-        self
-    }
-
-    /// Append a boolean flag as Proxmox's `1`/`0` if `v` is Some.
-    pub fn flag(self, key: &'static str, v: Option<bool>) -> Self {
-        self.opt(key, v.map(i32::from))
-    }
-
-    pub fn into_params(self) -> Vec<(&'static str, String)> {
-        self.params
-    }
-}
-
-impl Default for QueryBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
+fn tool_error(msg: &str) -> CallToolResult {
+    CallToolResult::error(vec![ContentBlock::text(msg)])
 }
 
 /// Summarize a tool's accepted fields ("required first") from its JSON input
@@ -263,45 +88,6 @@ fn enrich_argument_error(mut result: CallToolResult, tool: Option<&Tool>) -> Cal
 fn expected_fields_suffix(tool: Option<&Tool>) -> Option<String> {
     let summary = expected_fields_summary(&tool?.input_schema)?;
     Some(format!(". Expected fields: {summary}"))
-}
-
-/// Resolve the requested cluster, run a domain function against it, and convert
-/// the Result into an MCP response. An unknown cluster is an in-band tool error.
-macro_rules! respond {
-    ($self:expr, $domain_fn:path, $cluster:expr, $p:expr, $noun:literal) => {{
-        match $self.client_for($cluster) {
-            Ok((name, client)) => $self.respond_in(name, $domain_fn(client, $p).await, $noun),
-            Err(msg) => $crate::tools::tool_error(&msg),
-        }
-    }};
-    ($self:expr, $domain_fn:path, $args:expr, $noun:literal) => {{
-        let Scoped { cluster, inner } = $args;
-        respond!($self, $domain_fn, cluster.as_deref(), inner, $noun)
-    }};
-}
-
-/// Like `respond!`, but `cluster: "*"` runs the domain fn against every
-/// cluster concurrently and merges the (array) results under `$key`.
-macro_rules! respond_any {
-    ($self:expr, $domain_fn:path, $args:expr, $noun:literal, $key:literal) => {{
-        let AnyScoped { cluster, inner } = $args;
-        if cluster.as_deref() == Some(ALL_CLUSTERS) {
-            let handles = $self
-                .clusters
-                .entries
-                .iter()
-                .map(|(name, entry)| {
-                    let client = entry.client.clone();
-                    let p = inner.clone();
-                    let handle = tokio::spawn(async move { $domain_fn(&client, p).await });
-                    (name.clone(), handle)
-                })
-                .collect();
-            $self.merge_all(handles, $noun, $key).await
-        } else {
-            respond!($self, $domain_fn, cluster.as_deref(), inner, $noun)
-        }
-    }};
 }
 
 // --------------------------------------------------------------------------
@@ -391,76 +177,119 @@ impl ProxmoxMcpServer {
         ))
     }
 
-    /// `respond`, with the cluster named in any error once there is more than
-    /// one to tell apart.
-    fn respond_in(
-        &self,
-        cluster: &str,
-        result: Result<Value, ProxmoxError>,
+    /// Run a domain call against one cluster (None = default) and convert the
+    /// result into a tool response. An unknown cluster is an in-band tool error.
+    async fn call<'s, P, Fut>(
+        &'s self,
+        cluster: Option<&str>,
         noun: &str,
-    ) -> Result<CallToolResult, McpError> {
-        if self.is_multi_cluster() {
-            respond(result, &format!("[{cluster}] {noun}"))
-        } else {
-            respond(result, noun)
+        p: P,
+        f: impl FnOnce(&'s ProxmoxClient, P) -> Fut,
+    ) -> Result<CallToolResult, McpError>
+    where
+        Fut: Future<Output = Result<Value, ProxmoxError>>,
+    {
+        let (name, client) = match self.client_for(cluster) {
+            Ok(found) => found,
+            Err(msg) => return Ok(tool_error(&msg)),
+        };
+        match f(client, p).await {
+            Ok(v) => json_result(v),
+            Err(e) => {
+                let msg = self.error_message(name, noun, &e);
+                tracing::error!("{msg}");
+                Ok(tool_error(&msg))
+            }
         }
     }
 
-    /// Shared body for the "GET this fixed path" tools that take only `cluster`.
+    /// `"{noun}: {error}"`, prefixed with the cluster once there is more than one
+    /// to tell apart. Also what gets logged (operator-facing, via `--debug` /
+    /// `--log-file`); the same text is returned in-band to the client.
+    fn error_message(&self, cluster: &str, noun: &str, e: &ProxmoxError) -> String {
+        if self.is_multi_cluster() {
+            format!("[{cluster}] {noun}: {}", e.to_tool_message())
+        } else {
+            format!("{noun}: {}", e.to_tool_message())
+        }
+    }
+
+    /// Body of a tool taking `Scoped<P>`: run `f` against the selected cluster.
+    async fn scoped<'s, P, Fut>(
+        &'s self,
+        args: Scoped<P>,
+        noun: &str,
+        f: impl FnOnce(&'s ProxmoxClient, P) -> Fut,
+    ) -> Result<CallToolResult, McpError>
+    where
+        Fut: Future<Output = Result<Value, ProxmoxError>>,
+    {
+        self.call(args.cluster.as_deref(), noun, args.inner, f)
+            .await
+    }
+
+    /// Body of the "GET this fixed path" tools that take only `cluster`.
     async fn get_simple(
         &self,
         args: Scoped<NoParams>,
         path: &str,
         noun: &str,
     ) -> Result<CallToolResult, McpError> {
-        match self.client_for(args.cluster.as_deref()) {
-            Ok((name, client)) => self.respond_in(name, client.get(path, &[]).await, noun),
-            Err(msg) => tool_error(&msg),
-        }
+        self.call(args.cluster.as_deref(), noun, (), |client, ()| {
+            client.get(path, &[])
+        })
+        .await
     }
 
-    /// Merge per-cluster array results from a `cluster: "*"` call into
-    /// `{ <key>: [...each item tagged with "cluster"], "unreachable": {name: error} }`.
-    /// Fails only if every cluster failed.
-    async fn merge_all(
-        &self,
-        handles: Vec<(String, JoinHandle<Result<Value, ProxmoxError>>)>,
+    /// Body of a tool taking `AnyScoped<P>`. With `cluster: "*"`, runs `f`
+    /// against every cluster concurrently and merges the array results into
+    /// `{ <key>: [...each item tagged with "cluster"], "unreachable": {name: error} }`;
+    /// fails only if every cluster failed. Otherwise behaves like [`Self::scoped`].
+    async fn any_scoped<'s, P, Fut>(
+        &'s self,
+        args: AnyScoped<P>,
         noun: &str,
         key: &str,
-    ) -> Result<CallToolResult, McpError> {
-        let total = handles.len();
+        f: impl Fn(&'s ProxmoxClient, P) -> Fut,
+    ) -> Result<CallToolResult, McpError>
+    where
+        P: Clone,
+        Fut: Future<Output = Result<Value, ProxmoxError>>,
+    {
+        if args.cluster.as_deref() != Some(ALL_CLUSTERS) {
+            return self
+                .call(args.cluster.as_deref(), noun, args.inner, f)
+                .await;
+        }
+        let calls = self.clusters.entries.iter().map(|(name, entry)| {
+            let call = f(&entry.client, args.inner.clone());
+            async move { (name, call.await) }
+        });
+        let results = futures::future::join_all(calls).await;
+
+        let total = results.len();
         let mut items = Vec::new();
         let mut unreachable = serde_json::Map::new();
-        for (name, handle) in handles {
-            let data = match handle.await {
-                Ok(Ok(data)) => data,
-                Ok(Err(e)) => {
-                    let msg = e.to_tool_message();
-                    tracing::error!("[{name}] {noun}: {msg}");
-                    unreachable.insert(name, Value::String(msg));
-                    continue;
-                }
-                Err(e) => {
-                    tracing::error!("[{name}] {noun}: task failed: {e}");
-                    unreachable.insert(name, Value::String(format!("internal error: {e}")));
-                    continue;
-                }
-            };
-            match data {
-                Value::Array(list) => items.extend(list.into_iter().map(|mut item| {
+        for (name, result) in results {
+            match result {
+                Ok(Value::Array(list)) => items.extend(list.into_iter().map(|mut item| {
                     if let Value::Object(map) = &mut item {
                         map.insert("cluster".to_string(), Value::String(name.clone()));
                     }
                     item
                 })),
-                other => items.push(json!({ "cluster": name, "data": other })),
+                Ok(other) => items.push(json!({ "cluster": name, "data": other })),
+                Err(e) => {
+                    tracing::error!("{}", self.error_message(name, noun, &e));
+                    unreachable.insert(name.clone(), Value::String(e.to_tool_message()));
+                }
             }
         }
         if total > 0 && unreachable.len() == total {
-            return tool_error(&format!(
+            return Ok(tool_error(&format!(
                 "{noun}: every cluster failed: {}",
                 Value::Object(unreachable)
-            ));
+            )));
         }
         let mut out = serde_json::Map::new();
         out.insert(key.to_string(), Value::Array(items));
@@ -531,13 +360,13 @@ impl ProxmoxMcpServer {
         &self,
         Parameters(p): Parameters<AnyScoped<cluster::ClusterResourcesParams>>,
     ) -> Result<CallToolResult, McpError> {
-        respond_any!(
-            self,
-            cluster::cluster_resources,
+        self.any_scoped(
             p,
             "listing cluster resources",
-            "resources"
+            "resources",
+            cluster::cluster_resources,
         )
+        .await
     }
 
     #[tool(
@@ -548,7 +377,8 @@ impl ProxmoxMcpServer {
         &self,
         Parameters(p): Parameters<Scoped<cluster::ClusterTasksParams>>,
     ) -> Result<CallToolResult, McpError> {
-        respond!(self, cluster::cluster_tasks, p, "listing cluster tasks")
+        self.scoped(p, "listing cluster tasks", cluster::cluster_tasks)
+            .await
     }
 
     #[tool(
@@ -559,7 +389,8 @@ impl ProxmoxMcpServer {
         &self,
         Parameters(p): Parameters<AnyScoped<cluster::GuestFindParams>>,
     ) -> Result<CallToolResult, McpError> {
-        respond_any!(self, cluster::guest_find, p, "finding guests", "guests")
+        self.any_scoped(p, "finding guests", "guests", cluster::guest_find)
+            .await
     }
 
     // ---- nodes ----
@@ -582,7 +413,8 @@ impl ProxmoxMcpServer {
         &self,
         Parameters(p): Parameters<Scoped<nodes::NodeParams>>,
     ) -> Result<CallToolResult, McpError> {
-        respond!(self, nodes::node_status, p, "getting node status")
+        self.scoped(p, "getting node status", nodes::node_status)
+            .await
     }
 
     #[tool(
@@ -593,7 +425,8 @@ impl ProxmoxMcpServer {
         &self,
         Parameters(p): Parameters<Scoped<nodes::NodeTasksParams>>,
     ) -> Result<CallToolResult, McpError> {
-        respond!(self, nodes::node_tasks, p, "listing node tasks")
+        self.scoped(p, "listing node tasks", nodes::node_tasks)
+            .await
     }
 
     // ---- QEMU VMs ----
@@ -605,7 +438,7 @@ impl ProxmoxMcpServer {
         &self,
         Parameters(p): Parameters<Scoped<nodes::QemuListParams>>,
     ) -> Result<CallToolResult, McpError> {
-        respond!(self, nodes::qemu_list, p, "listing VMs")
+        self.scoped(p, "listing VMs", nodes::qemu_list).await
     }
 
     #[tool(
@@ -616,7 +449,8 @@ impl ProxmoxMcpServer {
         &self,
         Parameters(p): Parameters<Scoped<nodes::GuestParams>>,
     ) -> Result<CallToolResult, McpError> {
-        respond!(self, nodes::qemu_config, p, "getting VM config")
+        self.scoped(p, "getting VM config", nodes::qemu_config)
+            .await
     }
 
     #[tool(
@@ -627,41 +461,8 @@ impl ProxmoxMcpServer {
         &self,
         Parameters(p): Parameters<Scoped<nodes::GuestParams>>,
     ) -> Result<CallToolResult, McpError> {
-        respond!(self, nodes::qemu_status, p, "getting VM status")
-    }
-
-    // ---- LXC containers ----
-    #[tool(
-        description = "List LXC containers (CTs) on a node. To find a container by name across the cluster, use proxmox_guests_find.",
-        annotations(read_only_hint = true, open_world_hint = false)
-    )]
-    async fn proxmox_lxc_list(
-        &self,
-        Parameters(p): Parameters<Scoped<nodes::NodeParams>>,
-    ) -> Result<CallToolResult, McpError> {
-        respond!(self, nodes::lxc_list, p, "listing containers")
-    }
-
-    #[tool(
-        description = "Get an LXC container's configuration — its resources and settings: cores, memory, rootfs/disks, network. Needs node + vmid; if you only have a name, call proxmox_guests_find first.",
-        annotations(read_only_hint = true, open_world_hint = false)
-    )]
-    async fn proxmox_lxc_config_get(
-        &self,
-        Parameters(p): Parameters<Scoped<nodes::GuestParams>>,
-    ) -> Result<CallToolResult, McpError> {
-        respond!(self, nodes::lxc_config, p, "getting container config")
-    }
-
-    #[tool(
-        description = "Get an LXC container's current runtime status: whether it's running, plus live CPU, memory, and uptime. Needs node + vmid; if you only have a name, call proxmox_guests_find first.",
-        annotations(read_only_hint = true, open_world_hint = false)
-    )]
-    async fn proxmox_lxc_status_get(
-        &self,
-        Parameters(p): Parameters<Scoped<nodes::GuestParams>>,
-    ) -> Result<CallToolResult, McpError> {
-        respond!(self, nodes::lxc_status, p, "getting container status")
+        self.scoped(p, "getting VM status", nodes::qemu_status)
+            .await
     }
 
     // ---- storage ----
@@ -673,7 +474,7 @@ impl ProxmoxMcpServer {
         &self,
         Parameters(p): Parameters<Scoped<nodes::StorageListParams>>,
     ) -> Result<CallToolResult, McpError> {
-        respond!(self, nodes::storage_list, p, "listing storage")
+        self.scoped(p, "listing storage", nodes::storage_list).await
     }
 
     #[tool(
@@ -684,7 +485,8 @@ impl ProxmoxMcpServer {
         &self,
         Parameters(p): Parameters<Scoped<nodes::StorageContentParams>>,
     ) -> Result<CallToolResult, McpError> {
-        respond!(self, nodes::storage_content, p, "listing storage content")
+        self.scoped(p, "listing storage content", nodes::storage_content)
+            .await
     }
 
     // ---- network ----
@@ -696,7 +498,8 @@ impl ProxmoxMcpServer {
         &self,
         Parameters(p): Parameters<Scoped<nodes::NetworkListParams>>,
     ) -> Result<CallToolResult, McpError> {
-        respond!(self, nodes::network_list, p, "listing node network")
+        self.scoped(p, "listing node network", nodes::network_list)
+            .await
     }
 
     #[tool(
@@ -707,7 +510,8 @@ impl ProxmoxMcpServer {
         &self,
         Parameters(p): Parameters<Scoped<nodes::NetworkInterfaceParams>>,
     ) -> Result<CallToolResult, McpError> {
-        respond!(self, nodes::network_get, p, "getting network interface")
+        self.scoped(p, "getting network interface", nodes::network_get)
+            .await
     }
 
     // ---- tasks ----
@@ -719,7 +523,8 @@ impl ProxmoxMcpServer {
         &self,
         Parameters(p): Parameters<Scoped<nodes::TaskParams>>,
     ) -> Result<CallToolResult, McpError> {
-        respond!(self, nodes::task_status, p, "getting task status")
+        self.scoped(p, "getting task status", nodes::task_status)
+            .await
     }
 
     #[tool(
@@ -730,7 +535,7 @@ impl ProxmoxMcpServer {
         &self,
         Parameters(p): Parameters<Scoped<nodes::TaskLogParams>>,
     ) -> Result<CallToolResult, McpError> {
-        respond!(self, nodes::task_log, p, "reading task log")
+        self.scoped(p, "reading task log", nodes::task_log).await
     }
 
     // ---- snapshots ----
@@ -742,7 +547,8 @@ impl ProxmoxMcpServer {
         &self,
         Parameters(p): Parameters<Scoped<nodes::GuestParams>>,
     ) -> Result<CallToolResult, McpError> {
-        respond!(self, nodes::qemu_snapshots, p, "listing VM snapshots")
+        self.scoped(p, "listing VM snapshots", nodes::qemu_snapshots)
+            .await
     }
 
     // ---- backups ----
@@ -808,7 +614,7 @@ impl ProxmoxMcpServer {
         &self,
         Parameters(p): Parameters<Scoped<nodes::DisksListParams>>,
     ) -> Result<CallToolResult, McpError> {
-        respond!(self, nodes::disks_list, p, "listing disks")
+        self.scoped(p, "listing disks", nodes::disks_list).await
     }
 
     #[tool(
@@ -819,7 +625,8 @@ impl ProxmoxMcpServer {
         &self,
         Parameters(p): Parameters<Scoped<nodes::DiskSmartParams>>,
     ) -> Result<CallToolResult, McpError> {
-        respond!(self, nodes::disk_smart, p, "getting SMART data")
+        self.scoped(p, "getting SMART data", nodes::disk_smart)
+            .await
     }
 
     #[tool(
@@ -830,7 +637,7 @@ impl ProxmoxMcpServer {
         &self,
         Parameters(p): Parameters<Scoped<nodes::NodeParams>>,
     ) -> Result<CallToolResult, McpError> {
-        respond!(self, nodes::zfs_list, p, "listing ZFS pools")
+        self.scoped(p, "listing ZFS pools", nodes::zfs_list).await
     }
 
     #[tool(
@@ -841,7 +648,8 @@ impl ProxmoxMcpServer {
         &self,
         Parameters(p): Parameters<Scoped<nodes::ZfsPoolParams>>,
     ) -> Result<CallToolResult, McpError> {
-        respond!(self, nodes::zfs_get, p, "getting ZFS pool status")
+        self.scoped(p, "getting ZFS pool status", nodes::zfs_get)
+            .await
     }
 
     // ---- replication ----
@@ -853,7 +661,8 @@ impl ProxmoxMcpServer {
         &self,
         Parameters(p): Parameters<Scoped<nodes::ReplicationParams>>,
     ) -> Result<CallToolResult, McpError> {
-        respond!(self, nodes::replication_list, p, "listing replication jobs")
+        self.scoped(p, "listing replication jobs", nodes::replication_list)
+            .await
     }
 }
 
@@ -874,8 +683,7 @@ impl ServerHandler for ProxmoxMcpServer {
              modified). Start with proxmox_cluster_resources_list for a one-call inventory of \
              all VMs, containers, storage, and nodes. To inspect a guest you know only by name, \
              first call proxmox_guests_find to resolve it to a node + vmid — the per-guest tools \
-             (proxmox_qemu_config_get / proxmox_qemu_status_get and their proxmox_lxc_* \
-             equivalents) require both. To find out why a task (backup, migration, start/stop) \
+             (proxmox_qemu_config_get / proxmox_qemu_status_get) require both. To find out why a task (backup, migration, start/stop) \
              failed, pass its upid from a task list to proxmox_tasks_log_get. Epoch timestamp \
              fields are returned alongside an ISO 8601 <field>_iso sibling.",
         );
@@ -921,185 +729,51 @@ impl ServerHandler for ProxmoxMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_tool_is_annotated_read_only() {
-        // This server wraps only Proxmox GET endpoints, so every tool must
-        // advertise the read-only behavior hints (readOnlyHint = true,
-        // openWorldHint = false) that let MCP clients auto-approve them. Fail
-        // closed: a newly added tool whose `#[tool]` omits `annotations(...)`,
-        // or that ships a write-capable hint, trips this.
-        for tool in ProxmoxMcpServer::tool_router().list_all() {
-            let ann = tool
-                .annotations
-                .as_ref()
-                .unwrap_or_else(|| panic!("{} is missing tool annotations", tool.name));
-            assert_eq!(
-                ann.read_only_hint,
-                Some(true),
-                "{} must declare read_only_hint = true",
-                tool.name
-            );
-            assert_eq!(
-                ann.open_world_hint,
-                Some(false),
-                "{} must declare open_world_hint = false",
-                tool.name
-            );
-        }
-    }
-
-    #[test]
-    fn encode_seg_passes_unreserved() {
-        assert_eq!(encode_seg("pve-node1"), "pve-node1");
-        assert_eq!(encode_seg("local-zfs"), "local-zfs");
-        assert_eq!(encode_seg("a.b_c~d"), "a.b_c~d");
-    }
-
-    #[test]
-    fn encode_seg_escapes_path_traversal_and_specials() {
-        assert_eq!(encode_seg("../etc"), "..%2Fetc");
-        assert_eq!(encode_seg("a/b"), "a%2Fb");
-        assert_eq!(encode_seg("a b"), "a%20b");
-        assert_eq!(encode_seg("a?b#c"), "a%3Fb%23c");
-    }
-
-    #[test]
-    fn query_builder_skips_none() {
-        let params = QueryBuilder::new()
-            .opt("a", Some(1))
-            .opt::<i32>("b", None)
-            .opt("c", Some("x".to_string()))
-            .into_params();
-        assert_eq!(params, vec![("a", "1".to_string()), ("c", "x".to_string())]);
-    }
-
-    #[test]
-    fn expected_fields_summary_lists_required_first() {
-        let router = ProxmoxMcpServer::tool_router();
-        let tool = router.get("proxmox_qemu_config_get").unwrap();
-        let summary = expected_fields_summary(&tool.input_schema).unwrap();
-        assert!(summary.contains("node (required)"), "{summary}");
-        assert!(summary.contains("vmid (required)"), "{summary}");
-    }
-
-    #[test]
-    fn enrich_invalid_params_appends_expected_fields() {
-        let router = ProxmoxMcpServer::tool_router();
-        let err = McpError::invalid_params(
-            "failed to deserialize parameters: missing field `vmid`",
-            None,
-        );
-        let enriched = enrich_invalid_params(err, router.get("proxmox_qemu_config_get"));
-        assert!(
-            enriched.message.contains("missing field `vmid`"),
-            "{}",
-            enriched.message
-        );
-        assert!(
-            enriched.message.contains("Expected fields: ")
-                && enriched.message.contains("node (required)"),
-            "{}",
-            enriched.message
-        );
-    }
-
-    #[test]
-    fn enrich_argument_error_appends_fields_to_in_band_argument_errors() {
-        let router = ProxmoxMcpServer::tool_router();
-        let result = CallToolResult::error(vec![ContentBlock::text(
-            "failed to deserialize parameters: missing field `vmid`",
-        )]);
-        let enriched = enrich_argument_error(result, router.get("proxmox_qemu_config_get"));
-        let text = &enriched.content[0].as_text().unwrap().text;
-        assert!(text.contains("missing field `vmid`"), "{text}");
-        assert!(
-            text.contains("Expected fields: ") && text.contains("vmid (required)"),
-            "{text}"
-        );
-    }
-
-    #[test]
-    fn enrich_argument_error_leaves_other_results_alone() {
-        let router = ProxmoxMcpServer::tool_router();
-        let tool = router.get("proxmox_qemu_config_get");
-        // An ordinary tool error (e.g. a Proxmox API failure) is not an argument error.
-        let api_err = CallToolResult::error(vec![ContentBlock::text("getting VM config: 500")]);
-        let text = enrich_argument_error(api_err, tool).content[0]
-            .as_text()
-            .unwrap()
-            .text
-            .clone();
-        assert_eq!(text, "getting VM config: 500");
-        // Success with prefix-like text stays untouched too.
-        let ok = CallToolResult::success(vec![ContentBlock::text(
-            "failed to deserialize parameters: but this is data",
-        )]);
-        let text = enrich_argument_error(ok, tool).content[0]
-            .as_text()
-            .unwrap()
-            .text
-            .clone();
-        assert!(!text.contains("Expected fields"), "{text}");
-    }
-
-    #[test]
-    fn enrich_invalid_params_without_tool_keeps_error_unchanged() {
-        let err = McpError::invalid_params("failed to deserialize parameters", None);
-        let enriched = enrich_invalid_params(err, None);
-        assert_eq!(enriched.message, "failed to deserialize parameters");
-    }
-
-    #[test]
-    fn node_id_renders_description_inline() {
-        // The NodeId newtype carries the parameter description in one place;
-        // verify it reaches the per-tool input schema inline (not behind a
-        // `$ref`, which inline_schema() prevents) so LLM callers still see it.
-        let router = ProxmoxMcpServer::tool_router();
-        let tool = router.get("proxmox_nodes_status_get").unwrap();
-        let node = tool
-            .input_schema
-            .get("properties")
-            .unwrap()
-            .get("node")
-            .unwrap();
-        assert!(node.get("$ref").is_none(), "node must be inlined: {node}");
-        assert_eq!(node["type"], "string");
-        assert!(
-            node["description"]
-                .as_str()
-                .unwrap()
-                .contains("proxmox_nodes_list"),
-            "{node}"
-        );
-    }
-
-    #[test]
-    fn node_id_deserializes_transparently_from_string() {
-        // The wire contract is unchanged: a plain JSON string still deserializes
-        // into the newtype, and it derefs back to that string.
-        let p: nodes::NodeParams = serde_json::from_value(json!({ "node": "pve1" })).unwrap();
-        assert_eq!(&*p.node, "pve1");
-    }
-
-    // ------------------------------------------------------------------
-    // Pipeline tests — exercise the full path through a wiremock server:
-    // domain fn → ProxmoxClient (HTTP + data-envelope unwrap) → slim_value.
-    // ------------------------------------------------------------------
-
+    use crate::client::mock_client;
     use crate::config::Connection;
+    use params::encode_seg;
     use rmcp::handler::server::wrapper::Parameters;
-    use serde_json::{Value, json};
+    use serde::de::DeserializeOwned;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn mock_client(uri: &str) -> ProxmoxClient {
-        ProxmoxClient::new(Connection {
-            url: uri.to_string(),
-            token: "root@pam!mcp=secret".to_string(),
-            insecure: false,
-        })
-        .unwrap()
+    // ------------------------------------------------------------------
+    // Helpers
+    // ------------------------------------------------------------------
+
+    /// Answer GET `p` (when every `query` pair is present) with `{ "data": body }`.
+    /// Any other request 404s, so a wrong path or parameter fails the test.
+    async fn mount_data(server: &MockServer, p: &str, query: &[(&str, &str)], body: Value) {
+        let mut mock = Mock::given(method("GET")).and(path(p));
+        for (k, v) in query {
+            mock = mock.and(query_param(*k, *v));
+        }
+        mock.respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": body })))
+            .mount(server)
+            .await;
+    }
+
+    /// Answer every GET with `status` and a plain-text `body`.
+    async fn mount_failure(server: &MockServer, status: u16, body: &str) {
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(status).set_body_string(body))
+            .mount(server)
+            .await;
+    }
+
+    /// Build domain-fn params from JSON, through the same deserialization the
+    /// tool arguments go through.
+    fn params<T: DeserializeOwned>(v: Value) -> T {
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// Build tool args the way rmcp does: deserialize the JSON arguments object.
+    fn args<T: DeserializeOwned>(v: Value) -> Parameters<T> {
+        Parameters(params(v))
+    }
+
+    fn text_of(result: &CallToolResult) -> &str {
+        &result.content[0].as_text().unwrap().text
     }
 
     fn mock_server(uri: &str) -> ProxmoxMcpServer {
@@ -1110,40 +784,31 @@ mod tests {
         let entries = clusters
             .iter()
             .map(|(name, uri)| {
-                (
-                    (*name).to_string(),
-                    Connection {
-                        url: (*uri).to_string(),
-                        token: format!("root@pam!mcp=secret-{name}"),
-                        insecure: false,
-                    },
-                )
+                let conn = Connection {
+                    url: (*uri).to_string(),
+                    token: format!("root@pam!mcp=secret-{name}"),
+                    insecure: false,
+                };
+                ((*name).to_string(), conn)
             })
             .collect();
-        ProxmoxMcpServer::new(crate::config::Clusters {
+        ProxmoxMcpServer::new(Clusters {
             default: default.to_string(),
             entries,
         })
         .unwrap()
     }
 
-    /// Build tool args the way rmcp does: deserialize the JSON arguments object.
-    fn args<T: serde::de::DeserializeOwned>(v: Value) -> Parameters<T> {
-        Parameters(serde_json::from_value(v).unwrap())
+    fn two_unreachable_clusters() -> ProxmoxMcpServer {
+        mock_multi(
+            &[("a", "https://a.invalid"), ("b", "https://b.invalid")],
+            "a",
+        )
     }
 
-    fn text_of(result: &CallToolResult) -> &str {
-        &result.content[0].as_text().unwrap().text
-    }
-
-    async fn mount_version(server: &MockServer, release: &str) {
-        Mock::given(method("GET"))
-            .and(path("/version"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!({"data": {"release": release}})),
-            )
-            .mount(server)
-            .await;
+    fn input_schema(tool: &str) -> JsonObject {
+        let router = ProxmoxMcpServer::tool_router();
+        (*router.get(tool).unwrap().input_schema).clone()
     }
 
     /// Recursively assert no object field anywhere in `v` is JSON null.
@@ -1164,312 +829,57 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn pipeline_node_status_unwraps_and_slims() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/nodes/pve1/status"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": { "uptime": 1000, "cpu": 0.05, "lock": null }
-            })))
-            .mount(&server)
-            .await;
-
-        let client = mock_client(&server.uri());
-        let p = nodes::NodeParams {
-            node: "pve1".into(),
-        };
-        let raw = nodes::node_status(&client, p).await.unwrap();
-        let result = slim_value(raw);
-
-        // Envelope unwrapped to the inner object, and the null `lock` is gone.
-        assert_eq!(result["uptime"], json!(1000));
-        assert!(result.get("lock").is_none());
-        assert_no_nulls(&result, "root");
-    }
-
-    #[tokio::test]
-    async fn pipeline_qemu_config_interpolates_node_and_vmid() {
-        let server = MockServer::start().await;
-        // Mounted on the exact interpolated path; a wrong path 404s and unwrap fails.
-        Mock::given(method("GET"))
-            .and(path("/nodes/pve1/qemu/100/config"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": { "name": "web01", "cores": 2 }
-            })))
-            .mount(&server)
-            .await;
-
-        let client = mock_client(&server.uri());
-        let p = nodes::GuestParams {
-            node: "pve1".into(),
-            vmid: 100,
-        };
-        let result = nodes::qemu_config(&client, p).await.unwrap();
-        assert_eq!(result["name"], json!("web01"));
-    }
-
-    #[tokio::test]
-    async fn pipeline_qemu_list_sends_full_param() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/nodes/pve1/qemu"))
-            .and(query_param("full", "1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
-            .mount(&server)
-            .await;
-
-        let client = mock_client(&server.uri());
-        let p = nodes::QemuListParams {
-            node: "pve1".into(),
-            full: Some(true),
-        };
-        // The bool is serialized to Proxmox's `1`; mismatch would 404 and fail.
-        assert!(nodes::qemu_list(&client, p).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn pipeline_storage_content_interpolates_two_segments() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/nodes/pve1/storage/local-zfs/content"))
-            .and(query_param("content", "images"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
-            .mount(&server)
-            .await;
-
-        let client = mock_client(&server.uri());
-        let p = nodes::StorageContentParams {
-            node: "pve1".into(),
-            storage: "local-zfs".to_string(),
-            content: Some("images".to_string()),
-            vmid: None,
-        };
-        assert!(nodes::storage_content(&client, p).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn pipeline_network_list_passes_type_filter() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/nodes/pve1/network"))
-            .and(query_param("type", "bridge"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": [{ "iface": "vmbr0", "type": "bridge", "comments": null }]
-            })))
-            .mount(&server)
-            .await;
-
-        let client = mock_client(&server.uri());
-        let p = nodes::NetworkListParams {
-            node: "pve1".into(),
-            r#type: Some("bridge".to_string()),
-        };
-        let result = slim_value(nodes::network_list(&client, p).await.unwrap());
-        assert_eq!(result[0]["iface"], json!("vmbr0"));
-        assert_no_nulls(&result, "root");
-    }
-
-    #[tokio::test]
-    async fn pipeline_network_get_interpolates_iface() {
-        let server = MockServer::start().await;
-        // Mounted on the exact interpolated path; a wrong path 404s and unwrap fails.
-        Mock::given(method("GET"))
-            .and(path("/nodes/pve1/network/vmbr0"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": { "iface": "vmbr0", "type": "bridge", "bridge_ports": "eth0" }
-            })))
-            .mount(&server)
-            .await;
-
-        let client = mock_client(&server.uri());
-        let p = nodes::NetworkInterfaceParams {
-            node: "pve1".into(),
-            iface: "vmbr0".to_string(),
-        };
-        let result = nodes::network_get(&client, p).await.unwrap();
-        assert_eq!(result["bridge_ports"], json!("eth0"));
-    }
-
-    #[tokio::test]
-    async fn pipeline_cluster_resources_passes_type_filter() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/cluster/resources"))
-            .and(query_param("type", "vm"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": [{ "vmid": 100, "type": "qemu", "template": null }]
-            })))
-            .mount(&server)
-            .await;
-
-        let client = mock_client(&server.uri());
-        let p = cluster::ClusterResourcesParams {
-            r#type: Some("vm".to_string()),
-        };
-        let result = slim_value(cluster::cluster_resources(&client, p).await.unwrap());
-        assert_eq!(result[0]["vmid"], json!(100));
-        assert_no_nulls(&result, "root");
-    }
-
-    #[tokio::test]
-    async fn pipeline_qemu_list_strips_blockstat() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/nodes/pve1/qemu"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": [
-                    { "vmid": 100, "name": "web01", "blockstat": { "scsi0": { "rd_bytes": 1 } } }
-                ]
-            })))
-            .mount(&server)
-            .await;
-
-        let client = mock_client(&server.uri());
-        let p = nodes::QemuListParams {
-            node: "pve1".into(),
-            full: Some(true),
-        };
-        let result = nodes::qemu_list(&client, p).await.unwrap();
-        assert_eq!(result[0]["vmid"], json!(100));
-        // The heavy blockstat blob is gone; the useful fields remain.
-        assert!(result[0].get("blockstat").is_none());
-        assert_eq!(result[0]["name"], json!("web01"));
-    }
-
-    #[tokio::test]
-    async fn pipeline_cluster_tasks_filters_client_side() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/cluster/tasks"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
-                { "upid": "a", "node": "pve1", "starttime": 100, "status": "OK" },
-                { "upid": "b", "node": "pve2", "starttime": 200, "status": "some error" },
-                { "upid": "c", "node": "pve1", "starttime": 300, "status": "OK" },
-            ]})))
-            .mount(&server)
-            .await;
-
-        let client = mock_client(&server.uri());
-
-        // node filter
-        let p = cluster::ClusterTasksParams {
-            limit: None,
-            errors: None,
-            since: None,
-            node: Some("pve1".to_string()),
-        };
-        let r = cluster::cluster_tasks(&client, p).await.unwrap();
-        assert_eq!(r.as_array().unwrap().len(), 2);
-
-        // errors filter keeps only the non-OK task
-        let p = cluster::ClusterTasksParams {
-            limit: None,
-            errors: Some(true),
-            since: None,
-            node: None,
-        };
-        let r = cluster::cluster_tasks(&client, p).await.unwrap();
-        assert_eq!(r.as_array().unwrap().len(), 1);
-        assert_eq!(r[0]["upid"], json!("b"));
-
-        // since + limit
-        let p = cluster::ClusterTasksParams {
-            limit: Some(1),
-            errors: None,
-            since: Some(200),
-            node: None,
-        };
-        let r = cluster::cluster_tasks(&client, p).await.unwrap();
-        assert_eq!(r.as_array().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn pipeline_guest_find_filters_by_name() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/cluster/resources"))
-            .and(query_param("type", "vm"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
-                { "vmid": 100, "name": "web01", "node": "pve1" },
-                { "vmid": 101, "name": "db01", "node": "pve2" },
-            ]})))
-            .mount(&server)
-            .await;
-
-        let client = mock_client(&server.uri());
-        let p = cluster::GuestFindParams {
-            name: Some("WEB".to_string()),
-        };
-        let r = cluster::guest_find(&client, p).await.unwrap();
-        assert_eq!(r.as_array().unwrap().len(), 1);
-        assert_eq!(r[0]["vmid"], json!(100));
-        assert_eq!(r[0]["node"], json!("pve1"));
-    }
-
-    #[tokio::test]
-    async fn server_tool_returns_success_on_200() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/version"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!({"data": {"release": "8"}})),
-            )
-            .mount(&server)
-            .await;
-
-        let mcp = mock_server(&server.uri());
-        let result = mcp.proxmox_version_get(args(json!({}))).await.unwrap();
-        assert_ne!(result.is_error, Some(true));
-    }
-
-    #[tokio::test]
-    async fn server_tool_returns_tool_error_on_api_failure() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/nodes/ghost/status"))
-            .respond_with(ResponseTemplate::new(500).set_body_string("no such node"))
-            .mount(&server)
-            .await;
-
-        let mcp = mock_server(&server.uri());
-        // A failed API call surfaces as a tool error, not a transport-level Err.
-        let result = mcp
-            .proxmox_nodes_status_get(args(json!({ "node": "ghost" })))
-            .await
-            .unwrap();
-        assert_eq!(result.is_error, Some(true));
-        // Single-cluster error messages carry no cluster prefix.
-        assert!(
-            text_of(&result).starts_with("getting node status:"),
-            "{}",
-            text_of(&result)
-        );
-    }
-
     // ------------------------------------------------------------------
-    // Multi-cluster
+    // Tool registry and argument errors
     // ------------------------------------------------------------------
 
-    fn props(tool: &str) -> serde_json::Map<String, Value> {
-        let router = ProxmoxMcpServer::tool_router();
-        let tool = router.get(tool).unwrap();
-        tool.input_schema["properties"].as_object().unwrap().clone()
+    #[test]
+    fn every_tool_is_annotated_read_only() {
+        // This server wraps only Proxmox GET endpoints, so every tool must
+        // advertise the read-only behavior hints (readOnlyHint = true,
+        // openWorldHint = false) that let MCP clients auto-approve them. Fail
+        // closed: a newly added tool whose `#[tool]` omits `annotations(...)`,
+        // or that ships a write-capable hint, trips this.
+        for tool in ProxmoxMcpServer::tool_router().list_all() {
+            let ann = tool
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} is missing tool annotations", tool.name));
+            assert_eq!(
+                ann.read_only_hint,
+                Some(true),
+                "{} read_only_hint",
+                tool.name
+            );
+            assert_eq!(
+                ann.open_world_hint,
+                Some(false),
+                "{} open_world_hint",
+                tool.name
+            );
+        }
+    }
+
+    #[test]
+    fn every_tool_except_clusters_list_takes_cluster() {
+        for tool in ProxmoxMcpServer::tool_router().list_all() {
+            let has = tool
+                .input_schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .is_some_and(|p| p.contains_key("cluster"));
+            assert_eq!(has, tool.name != "proxmox_clusters_list", "{}", tool.name);
+        }
     }
 
     #[test]
     fn scoped_schema_flattens_cluster_beside_domain_fields() {
-        let router = ProxmoxMcpServer::tool_router();
-        let schema = &router.get("proxmox_qemu_config_get").unwrap().input_schema;
+        let schema = input_schema("proxmox_qemu_config_get");
         assert_eq!(schema["type"], "object");
-        let p = schema["properties"].as_object().unwrap();
+        let props = schema["properties"].as_object().unwrap();
         for field in ["cluster", "node", "vmid"] {
-            assert!(p.contains_key(field), "missing {field}: {schema:?}");
+            assert!(props.contains_key(field), "missing {field}: {schema:?}");
         }
-        assert!(
-            p["cluster"].get("$ref").is_none(),
-            "cluster must be inlined"
-        );
         let required: Vec<&str> = schema["required"]
             .as_array()
             .unwrap()
@@ -1481,26 +891,24 @@ mod tests {
     }
 
     #[test]
-    fn every_tool_except_clusters_list_takes_cluster() {
-        for tool in ProxmoxMcpServer::tool_router().list_all() {
-            let has = tool
-                .input_schema
-                .get("properties")
-                .and_then(Value::as_object)
-                .is_some_and(|p| p.contains_key("cluster"));
-            assert_eq!(
-                has,
-                tool.name != "proxmox_clusters_list",
-                "{} cluster argument",
-                tool.name
-            );
+    fn string_params_render_descriptions_inline() {
+        // The string_param! types carry their description in one place; it must
+        // reach each tool's schema inline (not behind a `$ref`) for LLM callers.
+        let props = input_schema("proxmox_nodes_status_get")["properties"].clone();
+        for (field, needle) in [
+            ("node", "proxmox_nodes_list"),
+            ("cluster", "proxmox_clusters_list"),
+        ] {
+            let f = &props[field];
+            assert!(f.get("$ref").is_none(), "{field} must be inlined: {f}");
+            assert!(f["description"].as_str().unwrap().contains(needle), "{f}");
         }
     }
 
     #[test]
     fn only_fan_out_tools_advertise_star() {
         let star = |tool: &str| {
-            props(tool)["cluster"]["description"]
+            input_schema(tool)["properties"]["cluster"]["description"]
                 .as_str()
                 .unwrap()
                 .contains("\"*\"")
@@ -1511,17 +919,442 @@ mod tests {
         assert!(!star("proxmox_version_get"));
     }
 
+    #[test]
+    fn expected_fields_summary_lists_required_first() {
+        let summary = expected_fields_summary(&input_schema("proxmox_qemu_config_get")).unwrap();
+        assert!(
+            summary.starts_with("node (required), vmid (required)"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn enrich_invalid_params_appends_expected_fields() {
+        let router = ProxmoxMcpServer::tool_router();
+        let err = McpError::invalid_params("missing field `vmid`", None);
+        let msg = enrich_invalid_params(err, router.get("proxmox_qemu_config_get")).message;
+        assert!(
+            msg.starts_with("missing field `vmid`. Expected fields: node (required)"),
+            "{msg}"
+        );
+
+        let err = McpError::invalid_params("bad", None);
+        assert_eq!(enrich_invalid_params(err, None).message, "bad");
+    }
+
+    #[test]
+    fn enrich_argument_error_appends_fields_only_to_argument_errors() {
+        let router = ProxmoxMcpServer::tool_router();
+        let tool = router.get("proxmox_qemu_config_get");
+        let enrich = |r: CallToolResult| text_of(&enrich_argument_error(r, tool)).to_string();
+
+        let arg_err = CallToolResult::error(vec![ContentBlock::text(
+            "failed to deserialize parameters: missing field `vmid`",
+        )]);
+        let text = enrich(arg_err);
+        assert!(
+            text.contains("missing field `vmid`. Expected fields: "),
+            "{text}"
+        );
+
+        // An ordinary tool error (e.g. a Proxmox API failure) is left alone…
+        let api_err = CallToolResult::error(vec![ContentBlock::text("getting VM config: 500")]);
+        assert_eq!(enrich(api_err), "getting VM config: 500");
+        // …and so is a success whose text merely looks like the prefix.
+        let ok = CallToolResult::success(vec![ContentBlock::text(
+            "failed to deserialize parameters: but this is data",
+        )]);
+        assert!(!enrich(ok).contains("Expected fields"));
+    }
+
+    #[test]
+    fn malformed_upid_is_an_argument_error() {
+        let err = serde_json::from_value::<Scoped<nodes::TaskParams>>(json!({ "upid": "nope" }))
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid task UPID"), "{err}");
+    }
+
+    // ------------------------------------------------------------------
+    // Domain fns through a mock Proxmox: path/query building, envelope
+    // unwrapping, and per-endpoint post-processing.
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn node_status_unwraps_and_slims() {
+        let server = MockServer::start().await;
+        let body = json!({ "uptime": 1000, "cpu": 0.05, "lock": null });
+        mount_data(&server, "/nodes/pve1/status", &[], body).await;
+
+        let raw = nodes::node_status(
+            &mock_client(&server.uri()),
+            params(json!({ "node": "pve1" })),
+        )
+        .await
+        .unwrap();
+        let result = slim_value(raw);
+        assert_eq!(result["uptime"], json!(1000));
+        assert!(result.get("lock").is_none());
+        assert_no_nulls(&result, "root");
+    }
+
+    #[tokio::test]
+    async fn qemu_config_interpolates_node_and_vmid() {
+        let server = MockServer::start().await;
+        mount_data(
+            &server,
+            "/nodes/pve1/qemu/100/config",
+            &[],
+            json!({ "name": "web01" }),
+        )
+        .await;
+        let p = params(json!({ "node": "pve1", "vmid": 100 }));
+        let r = nodes::qemu_config(&mock_client(&server.uri()), p)
+            .await
+            .unwrap();
+        assert_eq!(r["name"], json!("web01"));
+    }
+
+    #[tokio::test]
+    async fn qemu_list_sends_full_flag_and_strips_blockstat() {
+        let server = MockServer::start().await;
+        let body =
+            json!([{ "vmid": 100, "name": "web01", "blockstat": { "scsi0": { "rd_bytes": 1 } } }]);
+        mount_data(&server, "/nodes/pve1/qemu", &[("full", "1")], body).await;
+        let p = params(json!({ "node": "pve1", "full": true }));
+        let r = nodes::qemu_list(&mock_client(&server.uri()), p)
+            .await
+            .unwrap();
+        // The heavy blockstat blob is gone; the useful fields remain.
+        assert!(r[0].get("blockstat").is_none());
+        assert_eq!(r[0]["name"], json!("web01"));
+    }
+
+    #[tokio::test]
+    async fn qemu_snapshots_interpolates_node_and_vmid() {
+        let server = MockServer::start().await;
+        let body = json!([{ "name": "pre-upgrade" }, { "name": "current" }]);
+        mount_data(&server, "/nodes/pve1/qemu/100/snapshot", &[], body).await;
+        let p = params(json!({ "node": "pve1", "vmid": 100 }));
+        let r = nodes::qemu_snapshots(&mock_client(&server.uri()), p)
+            .await
+            .unwrap();
+        assert_eq!(r[0]["name"], json!("pre-upgrade"));
+    }
+
+    #[tokio::test]
+    async fn storage_content_interpolates_two_segments() {
+        let server = MockServer::start().await;
+        let p = "/nodes/pve1/storage/local-zfs/content";
+        mount_data(&server, p, &[("content", "images")], json!([])).await;
+        let p = params(json!({ "node": "pve1", "storage": "local-zfs", "content": "images" }));
+        assert!(
+            nodes::storage_content(&mock_client(&server.uri()), p)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn network_list_passes_type_filter() {
+        let server = MockServer::start().await;
+        let body = json!([{ "iface": "vmbr0", "type": "bridge", "comments": null }]);
+        mount_data(&server, "/nodes/pve1/network", &[("type", "bridge")], body).await;
+        let p = params(json!({ "node": "pve1", "type": "bridge" }));
+        let r = slim_value(
+            nodes::network_list(&mock_client(&server.uri()), p)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(r[0]["iface"], json!("vmbr0"));
+        assert_no_nulls(&r, "root");
+    }
+
+    #[tokio::test]
+    async fn network_get_interpolates_iface() {
+        let server = MockServer::start().await;
+        let body = json!({ "iface": "vmbr0", "bridge_ports": "eth0" });
+        mount_data(&server, "/nodes/pve1/network/vmbr0", &[], body).await;
+        let p = params(json!({ "node": "pve1", "iface": "vmbr0" }));
+        let r = nodes::network_get(&mock_client(&server.uri()), p)
+            .await
+            .unwrap();
+        assert_eq!(r["bridge_ports"], json!("eth0"));
+    }
+
+    #[tokio::test]
+    async fn cluster_resources_passes_type_filter() {
+        let server = MockServer::start().await;
+        let body = json!([{ "vmid": 100, "type": "qemu", "template": null }]);
+        mount_data(&server, "/cluster/resources", &[("type", "vm")], body).await;
+        let p = params(json!({ "type": "vm" }));
+        let r = slim_value(
+            cluster::cluster_resources(&mock_client(&server.uri()), p)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(r[0]["vmid"], json!(100));
+        assert_no_nulls(&r, "root");
+    }
+
+    #[tokio::test]
+    async fn cluster_tasks_filters_client_side() {
+        let server = MockServer::start().await;
+        let body = json!([
+            { "upid": "a", "node": "pve1", "starttime": 100, "status": "OK" },
+            { "upid": "b", "node": "pve2", "starttime": 200, "status": "some error" },
+            { "upid": "c", "node": "pve1", "starttime": 300, "status": "OK" },
+        ]);
+        mount_data(&server, "/cluster/tasks", &[], body).await;
+        let client = mock_client(&server.uri());
+        let tasks = |filter: Value| cluster::cluster_tasks(&client, params(filter));
+
+        assert_eq!(
+            tasks(json!({ "node": "pve1" }))
+                .await
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let r = tasks(json!({ "errors": true })).await.unwrap();
+        assert_eq!(
+            r,
+            json!([{ "upid": "b", "node": "pve2", "starttime": 200, "status": "some error" }])
+        );
+        let r = tasks(json!({ "since": 200, "limit": 1 })).await.unwrap();
+        assert_eq!(r.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn guest_find_filters_by_name() {
+        let server = MockServer::start().await;
+        let body = json!([
+            { "vmid": 100, "name": "web01", "node": "pve1" },
+            { "vmid": 101, "name": "db01", "node": "pve2" },
+        ]);
+        mount_data(&server, "/cluster/resources", &[("type", "vm")], body).await;
+        let p = params(json!({ "name": "WEB" }));
+        let r = cluster::guest_find(&mock_client(&server.uri()), p)
+            .await
+            .unwrap();
+        assert_eq!(r, json!([{ "vmid": 100, "name": "web01", "node": "pve1" }]));
+    }
+
+    const UPID: &str = "UPID:pve2:0000ABCD:00112233:66AABBCC:vzdump:100:root@pam!mcp:";
+
+    /// Node taken from the UPID; the UPID's `:`, `@` and `!` percent-encoded
+    /// into a single path segment.
+    fn task_path(suffix: &str) -> String {
+        format!("/nodes/pve2/tasks/{}/{suffix}", encode_seg(UPID))
+    }
+
+    #[tokio::test]
+    async fn task_status_routes_to_upid_node_with_encoded_upid() {
+        let server = MockServer::start().await;
+        let body = json!({ "status": "stopped", "exitstatus": "OK" });
+        mount_data(&server, &task_path("status"), &[], body).await;
+        let r = nodes::task_status(&mock_client(&server.uri()), params(json!({ "upid": UPID })))
+            .await
+            .unwrap();
+        assert_eq!(r["exitstatus"], json!("OK"));
+    }
+
+    async fn mount_task_log(server: &MockServer, lines: usize) {
+        let entries: Vec<Value> = (1..=lines)
+            .map(|n| json!({ "n": n, "t": format!("line {n}") }))
+            .collect();
+        mount_data(
+            server,
+            &task_path("log"),
+            &[("limit", "100000")],
+            json!(entries),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn task_log_defaults_to_tail() {
+        let server = MockServer::start().await;
+        mount_task_log(&server, 120).await;
+        let r = nodes::task_log(&mock_client(&server.uri()), params(json!({ "upid": UPID })))
+            .await
+            .unwrap();
+        assert_eq!(r["total_lines"], json!(120));
+        assert_eq!(r["start"], json!(70));
+        let lines = r["lines"].as_array().unwrap();
+        assert_eq!(lines.len(), 50);
+        assert_eq!(lines[0], json!("line 71"));
+        assert_eq!(lines[49], json!("line 120"));
+    }
+
+    #[tokio::test]
+    async fn task_log_pages_from_start_and_clamps() {
+        let server = MockServer::start().await;
+        mount_task_log(&server, 10).await;
+        let client = mock_client(&server.uri());
+        let log = |p: Value| nodes::task_log(&client, params(p));
+
+        let r = log(json!({ "upid": UPID, "start": 2, "limit": 3 }))
+            .await
+            .unwrap();
+        assert_eq!(r["lines"], json!(["line 3", "line 4", "line 5"]));
+        // Past the end: empty page, not a panic.
+        let r = log(json!({ "upid": UPID, "start": 50 })).await.unwrap();
+        assert_eq!(r["lines"], json!([]));
+        // Short log with the default tail: everything.
+        let r = log(json!({ "upid": UPID })).await.unwrap();
+        assert_eq!(r["start"], json!(0));
+        assert_eq!(r["lines"].as_array().unwrap().len(), 10);
+    }
+
+    #[tokio::test]
+    async fn disks_list_maps_flags_to_proxmox_names() {
+        let server = MockServer::start().await;
+        let query = [("include-partitions", "1"), ("skipsmart", "0")];
+        let body = json!([{ "devpath": "/dev/sda", "health": "PASSED" }]);
+        mount_data(&server, "/nodes/pve1/disks/list", &query, body).await;
+        let p = params(json!({ "node": "pve1", "include_partitions": true, "skipsmart": false }));
+        let r = nodes::disks_list(&mock_client(&server.uri()), p)
+            .await
+            .unwrap();
+        assert_eq!(r[0]["health"], json!("PASSED"));
+    }
+
+    #[tokio::test]
+    async fn disk_smart_passes_disk_as_query() {
+        let server = MockServer::start().await;
+        let query = [("disk", "/dev/nvme0n1"), ("healthonly", "1")];
+        mount_data(
+            &server,
+            "/nodes/pve1/disks/smart",
+            &query,
+            json!({ "health": "PASSED" }),
+        )
+        .await;
+        let p = params(json!({ "node": "pve1", "disk": "/dev/nvme0n1", "healthonly": true }));
+        assert!(
+            nodes::disk_smart(&mock_client(&server.uri()), p)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn zfs_get_interpolates_pool_name() {
+        let server = MockServer::start().await;
+        let body = json!({ "name": "rpool", "state": "ONLINE" });
+        mount_data(&server, "/nodes/pve1/disks/zfs/rpool", &[], body).await;
+        let p = params(json!({ "node": "pve1", "name": "rpool" }));
+        let r = nodes::zfs_get(&mock_client(&server.uri()), p)
+            .await
+            .unwrap();
+        assert_eq!(r["state"], json!("ONLINE"));
+    }
+
+    #[tokio::test]
+    async fn replication_maps_vmid_to_guest() {
+        let server = MockServer::start().await;
+        let body = json!([{ "id": "100-0", "fail_count": 0 }]);
+        mount_data(
+            &server,
+            "/nodes/pve1/replication",
+            &[("guest", "100")],
+            body,
+        )
+        .await;
+        let p = params(json!({ "node": "pve1", "vmid": 100 }));
+        let r = nodes::replication_list(&mock_client(&server.uri()), p)
+            .await
+            .unwrap();
+        assert_eq!(r[0]["id"], json!("100-0"));
+    }
+
+    // ------------------------------------------------------------------
+    // Server-level tool calls
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn tool_returns_success_on_200() {
+        let server = MockServer::start().await;
+        mount_data(&server, "/version", &[], json!({ "release": "8" })).await;
+        let r = mock_server(&server.uri())
+            .proxmox_version_get(args(json!({})))
+            .await
+            .unwrap();
+        assert_ne!(r.is_error, Some(true), "{}", text_of(&r));
+    }
+
+    #[tokio::test]
+    async fn api_failure_is_an_unprefixed_tool_error_with_one_cluster() {
+        let server = MockServer::start().await;
+        mount_failure(&server, 500, "no such node").await;
+        let r = mock_server(&server.uri())
+            .proxmox_nodes_status_get(args(json!({ "node": "ghost" })))
+            .await
+            .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        assert!(
+            text_of(&r).starts_with("getting node status:"),
+            "{}",
+            text_of(&r)
+        );
+    }
+
+    #[tokio::test]
+    async fn cluster_level_tools_hit_their_endpoints() {
+        let server = MockServer::start().await;
+        for (p, body) in [
+            ("/cluster/backup", json!([{ "id": "backup-1" }])),
+            (
+                "/cluster/backup-info/not-backed-up",
+                json!([{ "vmid": 105, "name": "scratch" }]),
+            ),
+            (
+                "/cluster/ha/status/current",
+                json!([{ "id": "quorum", "quorate": 1 }]),
+            ),
+            (
+                "/cluster/ha/resources",
+                json!([{ "sid": "vm:100", "state": "started" }]),
+            ),
+        ] {
+            mount_data(&server, p, &[], body).await;
+        }
+        let mcp = mock_server(&server.uri());
+        let results = [
+            mcp.proxmox_backup_jobs_list(args(json!({}))).await.unwrap(),
+            mcp.proxmox_guests_without_backup_list(args(json!({})))
+                .await
+                .unwrap(),
+            mcp.proxmox_ha_status_get(args(json!({}))).await.unwrap(),
+            mcp.proxmox_ha_resources_list(args(json!({})))
+                .await
+                .unwrap(),
+        ];
+        for (r, needle) in results
+            .iter()
+            .zip(["backup-1", "scratch", "quorum", "vm:100"])
+        {
+            assert_ne!(r.is_error, Some(true), "{}", text_of(r));
+            assert!(text_of(r).contains(needle), "{}", text_of(r));
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Multi-cluster
+    // ------------------------------------------------------------------
+
     #[tokio::test]
     async fn routes_to_named_cluster_and_defaults_when_omitted() {
         let a = MockServer::start().await;
         let b = MockServer::start().await;
-        mount_version(&a, "from-a").await;
-        mount_version(&b, "from-b").await;
+        mount_data(&a, "/version", &[], json!({ "release": "from-a" })).await;
+        mount_data(&b, "/version", &[], json!({ "release": "from-b" })).await;
         let mcp = mock_multi(&[("a", &a.uri()), ("b", &b.uri())], "a");
 
         let r = mcp.proxmox_version_get(args(json!({}))).await.unwrap();
         assert!(text_of(&r).contains("from-a"), "{}", text_of(&r));
-
         let r = mcp
             .proxmox_version_get(args(json!({ "cluster": "b" })))
             .await
@@ -1533,13 +1366,13 @@ mod tests {
     async fn routes_domain_tools_with_flattened_params() {
         let a = MockServer::start().await;
         let b = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/nodes/pve1/qemu/100/config"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!({"data": {"name": "on-b"}})),
-            )
-            .mount(&b)
-            .await;
+        mount_data(
+            &b,
+            "/nodes/pve1/qemu/100/config",
+            &[],
+            json!({ "name": "on-b" }),
+        )
+        .await;
         let mcp = mock_multi(&[("a", &a.uri()), ("b", &b.uri())], "a");
         let r = mcp
             .proxmox_qemu_config_get(args(json!({ "cluster": "b", "node": "pve1", "vmid": 100 })))
@@ -1551,26 +1384,21 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_cluster_is_tool_error_listing_names() {
-        let mcp = mock_multi(
-            &[("a", "https://a.invalid"), ("b", "https://b.invalid")],
-            "a",
-        );
-        let r = mcp
+        let r = two_unreachable_clusters()
             .proxmox_version_get(args(json!({ "cluster": "nope" })))
             .await
             .unwrap();
         assert_eq!(r.is_error, Some(true));
-        assert!(text_of(&r).contains("\"nope\""), "{}", text_of(&r));
-        assert!(text_of(&r).contains("a, b"), "{}", text_of(&r));
+        assert!(
+            text_of(&r).contains("unknown cluster \"nope\"; configured clusters: a, b"),
+            "{}",
+            text_of(&r)
+        );
     }
 
     #[tokio::test]
     async fn star_is_rejected_on_single_cluster_tools() {
-        let mcp = mock_multi(
-            &[("a", "https://a.invalid"), ("b", "https://b.invalid")],
-            "a",
-        );
-        let r = mcp
+        let r = two_unreachable_clusters()
             .proxmox_nodes_status_get(args(json!({ "cluster": "*", "node": "pve1" })))
             .await
             .unwrap();
@@ -1585,11 +1413,7 @@ mod tests {
     #[tokio::test]
     async fn multi_cluster_errors_name_the_cluster() {
         let a = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/nodes/ghost/status"))
-            .respond_with(ResponseTemplate::new(500).set_body_string("no such node"))
-            .mount(&a)
-            .await;
+        mount_failure(&a, 500, "no such node").await;
         let mcp = mock_multi(&[("a", &a.uri()), ("b", "https://b.invalid")], "a");
         let r = mcp
             .proxmox_nodes_status_get(args(json!({ "node": "ghost" })))
@@ -1602,37 +1426,16 @@ mod tests {
         );
     }
 
-    async fn mount_guests(server: &MockServer, guests: Value) {
-        Mock::given(method("GET"))
-            .and(path("/cluster/resources"))
-            .and(query_param("type", "vm"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": guests })))
-            .mount(server)
-            .await;
-    }
-
     #[tokio::test]
     async fn fan_out_tags_results_and_reports_unreachable() {
         let a = MockServer::start().await;
         let b = MockServer::start().await;
         let c = MockServer::start().await;
-        mount_guests(
-            &a,
-            json!([{ "vmid": 100, "name": "web01", "node": "pve1" }]),
-        )
-        .await;
-        mount_guests(
-            &b,
-            json!([
-                { "vmid": 200, "name": "web02", "node": "pve1" },
-                { "vmid": 201, "name": "db01", "node": "pve1" }
-            ]),
-        )
-        .await;
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(401).set_body_string("bad token"))
-            .mount(&c)
-            .await;
+        let guests_a = json!([{ "vmid": 100, "name": "web01" }]);
+        let guests_b = json!([{ "vmid": 200, "name": "web02" }, { "vmid": 201, "name": "db01" }]);
+        mount_data(&a, "/cluster/resources", &[("type", "vm")], guests_a).await;
+        mount_data(&b, "/cluster/resources", &[("type", "vm")], guests_b).await;
+        mount_failure(&c, 401, "bad token").await;
         let mcp = mock_multi(&[("a", &a.uri()), ("b", &b.uri()), ("c", &c.uri())], "a");
 
         let r = mcp
@@ -1641,49 +1444,48 @@ mod tests {
             .unwrap();
         assert_ne!(r.is_error, Some(true), "{}", text_of(&r));
         let out: Value = serde_json::from_str(text_of(&r)).unwrap();
-        let guests = out["guests"].as_array().unwrap();
-        assert_eq!(guests.len(), 2, "{out}");
-        assert!(
-            guests
-                .contains(&json!({ "vmid": 100, "name": "web01", "node": "pve1", "cluster": "a" }))
-        );
-        assert!(
-            guests
-                .contains(&json!({ "vmid": 200, "name": "web02", "node": "pve1", "cluster": "b" }))
+        assert_eq!(
+            out["guests"],
+            json!([
+                { "vmid": 100, "name": "web01", "cluster": "a" },
+                { "vmid": 200, "name": "web02", "cluster": "b" }
+            ])
         );
         assert!(
             out["unreachable"]["c"].as_str().unwrap().contains("401"),
             "{out}"
         );
-        assert!(out["unreachable"].get("a").is_none());
+        assert_eq!(out["unreachable"].as_object().unwrap().len(), 1, "{out}");
     }
 
     #[tokio::test]
     async fn fan_out_omits_unreachable_when_all_succeed() {
         let a = MockServer::start().await;
-        mount_guests(&a, json!([{ "vmid": 100, "name": "web01" }])).await;
-        let mcp = mock_server(&a.uri());
-        let r = mcp
+        mount_data(
+            &a,
+            "/cluster/resources",
+            &[("type", "vm")],
+            json!([{ "vmid": 100 }]),
+        )
+        .await;
+        let r = mock_server(&a.uri())
             .proxmox_guests_find(args(json!({ "cluster": "*" })))
             .await
             .unwrap();
         let out: Value = serde_json::from_str(text_of(&r)).unwrap();
-        assert_eq!(out["guests"][0]["cluster"], json!("default"));
-        assert!(out.get("unreachable").is_none(), "{out}");
+        assert_eq!(
+            out,
+            json!({ "guests": [{ "vmid": 100, "cluster": "default" }] })
+        );
     }
 
     #[tokio::test]
     async fn fan_out_fails_when_every_cluster_fails() {
         let a = MockServer::start().await;
         let b = MockServer::start().await;
-        for s in [&a, &b] {
-            Mock::given(method("GET"))
-                .respond_with(ResponseTemplate::new(500).set_body_string("down"))
-                .mount(s)
-                .await;
-        }
-        let mcp = mock_multi(&[("a", &a.uri()), ("b", &b.uri())], "a");
-        let r = mcp
+        mount_failure(&a, 500, "down").await;
+        mount_failure(&b, 500, "down").await;
+        let r = mock_multi(&[("a", &a.uri()), ("b", &b.uri())], "a")
             .proxmox_cluster_resources_list(args(json!({ "cluster": "*" })))
             .await
             .unwrap();
@@ -1698,11 +1500,19 @@ mod tests {
     #[tokio::test]
     async fn fan_out_tool_without_star_keeps_plain_array_shape() {
         let a = MockServer::start().await;
-        mount_guests(&a, json!([{ "vmid": 100, "name": "web01" }])).await;
-        let mcp = mock_multi(&[("a", &a.uri()), ("b", "https://b.invalid")], "a");
-        let r = mcp.proxmox_guests_find(args(json!({}))).await.unwrap();
+        mount_data(
+            &a,
+            "/cluster/resources",
+            &[("type", "vm")],
+            json!([{ "vmid": 100 }]),
+        )
+        .await;
+        let r = mock_multi(&[("a", &a.uri()), ("b", "https://b.invalid")], "a")
+            .proxmox_guests_find(args(json!({})))
+            .await
+            .unwrap();
         let out: Value = serde_json::from_str(text_of(&r)).unwrap();
-        assert_eq!(out, json!([{ "vmid": 100, "name": "web01" }]));
+        assert_eq!(out, json!([{ "vmid": 100 }]));
     }
 
     #[tokio::test]
@@ -1729,263 +1539,18 @@ mod tests {
 
     #[test]
     fn instructions_mention_clusters_only_when_several() {
-        let single = mock_server("https://a.invalid");
-        let text = single.get_info().instructions.unwrap();
+        let text = mock_server("https://a.invalid")
+            .get_info()
+            .instructions
+            .unwrap();
         assert!(!text.contains("`cluster`"), "{text}");
-
-        let multi = mock_multi(
+        let text = mock_multi(
             &[("a", "https://a.invalid"), ("b", "https://b.invalid")],
             "b",
-        );
-        let text = multi.get_info().instructions.unwrap();
-        assert!(text.contains("a, b (default: b)"), "{text}");
-    }
-
-    // ------------------------------------------------------------------
-    // Tasks, snapshots, backups, HA, disks, replication
-    // ------------------------------------------------------------------
-
-    const UPID: &str = "UPID:pve2:0000ABCD:00112233:66AABBCC:vzdump:100:root@pam!mcp:";
-
-    fn task_path(suffix: &str) -> String {
-        format!("/nodes/pve2/tasks/{}/{suffix}", encode_seg(UPID))
-    }
-
-    #[test]
-    fn upid_reads_node_and_rejects_malformed_ids() {
-        let p: nodes::TaskParams = serde_json::from_value(json!({ "upid": UPID })).unwrap();
-        assert_eq!(p.upid.node(), "pve2");
-        for bad in ["", "UPID", "UPID::x", "TASK:pve1:1", "pve1"] {
-            let err = serde_json::from_value::<Scoped<nodes::TaskParams>>(json!({ "upid": bad }))
-                .unwrap_err();
-            assert!(
-                err.to_string().contains("invalid task UPID"),
-                "{bad:?}: {err}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn pipeline_task_status_routes_to_upid_node_with_encoded_upid() {
-        let server = MockServer::start().await;
-        // Mounted on the exact path: node taken from the UPID, and the UPID's
-        // `:`, `@` and `!` percent-encoded into a single segment.
-        Mock::given(method("GET"))
-            .and(path(task_path("status")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": { "status": "stopped", "exitstatus": "OK" }
-            })))
-            .mount(&server)
-            .await;
-
-        let p = serde_json::from_value(json!({ "upid": UPID })).unwrap();
-        let r = nodes::task_status(&mock_client(&server.uri()), p)
-            .await
-            .unwrap();
-        assert_eq!(r["exitstatus"], json!("OK"));
-    }
-
-    async fn mount_task_log(server: &MockServer, lines: usize) {
-        let entries: Vec<Value> = (1..=lines)
-            .map(|n| json!({ "n": n, "t": format!("line {n}") }))
-            .collect();
-        Mock::given(method("GET"))
-            .and(path(task_path("log")))
-            .and(query_param("limit", "100000"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": entries })))
-            .mount(server)
-            .await;
-    }
-
-    #[tokio::test]
-    async fn pipeline_task_log_defaults_to_tail() {
-        let server = MockServer::start().await;
-        mount_task_log(&server, 120).await;
-        let p = serde_json::from_value(json!({ "upid": UPID })).unwrap();
-        let r = nodes::task_log(&mock_client(&server.uri()), p)
-            .await
-            .unwrap();
-        assert_eq!(r["total_lines"], json!(120));
-        assert_eq!(r["start"], json!(70));
-        let lines = r["lines"].as_array().unwrap();
-        assert_eq!(lines.len(), 50);
-        assert_eq!(lines[0], json!("line 71"));
-        assert_eq!(lines[49], json!("line 120"));
-    }
-
-    #[tokio::test]
-    async fn pipeline_task_log_pages_from_start_and_clamps() {
-        let server = MockServer::start().await;
-        mount_task_log(&server, 10).await;
-        let client = mock_client(&server.uri());
-
-        let p = serde_json::from_value(json!({ "upid": UPID, "start": 2, "limit": 3 })).unwrap();
-        let r = nodes::task_log(&client, p).await.unwrap();
-        assert_eq!(r["lines"], json!(["line 3", "line 4", "line 5"]));
-
-        // Past the end: empty page, not a panic.
-        let p = serde_json::from_value(json!({ "upid": UPID, "start": 50 })).unwrap();
-        let r = nodes::task_log(&client, p).await.unwrap();
-        assert_eq!(r["lines"], json!([]));
-
-        // Short log with the default tail: everything.
-        let p = serde_json::from_value(json!({ "upid": UPID })).unwrap();
-        let r = nodes::task_log(&client, p).await.unwrap();
-        assert_eq!(r["start"], json!(0));
-        assert_eq!(r["lines"].as_array().unwrap().len(), 10);
-    }
-
-    #[tokio::test]
-    async fn pipeline_qemu_snapshots_interpolates_node_and_vmid() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/nodes/pve1/qemu/100/snapshot"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": [{ "name": "pre-upgrade", "snaptime": 1_700_000_000 }, { "name": "current" }]
-            })))
-            .mount(&server)
-            .await;
-        let p = nodes::GuestParams {
-            node: "pve1".into(),
-            vmid: 100,
-        };
-        let r = nodes::qemu_snapshots(&mock_client(&server.uri()), p)
-            .await
-            .unwrap();
-        assert_eq!(r[0]["name"], json!("pre-upgrade"));
-    }
-
-    #[tokio::test]
-    async fn pipeline_disks_list_maps_flags_to_proxmox_names() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/nodes/pve1/disks/list"))
-            .and(query_param("include-partitions", "1"))
-            .and(query_param("skipsmart", "0"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": [{ "devpath": "/dev/sda", "health": "PASSED", "wearout": 97 }]
-            })))
-            .mount(&server)
-            .await;
-        let p = serde_json::from_value(json!({
-            "node": "pve1", "include_partitions": true, "skipsmart": false
-        }))
+        )
+        .get_info()
+        .instructions
         .unwrap();
-        let r = nodes::disks_list(&mock_client(&server.uri()), p)
-            .await
-            .unwrap();
-        assert_eq!(r[0]["health"], json!("PASSED"));
-    }
-
-    #[tokio::test]
-    async fn pipeline_disk_smart_passes_disk_as_query() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/nodes/pve1/disks/smart"))
-            .and(query_param("disk", "/dev/nvme0n1"))
-            .and(query_param("healthonly", "1"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!({ "data": { "health": "PASSED" } })),
-            )
-            .mount(&server)
-            .await;
-        let p = nodes::DiskSmartParams {
-            node: "pve1".into(),
-            disk: "/dev/nvme0n1".to_string(),
-            healthonly: Some(true),
-        };
-        assert!(
-            nodes::disk_smart(&mock_client(&server.uri()), p)
-                .await
-                .is_ok()
-        );
-    }
-
-    #[tokio::test]
-    async fn pipeline_zfs_get_interpolates_pool_name() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/nodes/pve1/disks/zfs/rpool"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": { "name": "rpool", "state": "ONLINE", "errors": "No known data errors" }
-            })))
-            .mount(&server)
-            .await;
-        let p = nodes::ZfsPoolParams {
-            node: "pve1".into(),
-            name: "rpool".to_string(),
-        };
-        let r = nodes::zfs_get(&mock_client(&server.uri()), p)
-            .await
-            .unwrap();
-        assert_eq!(r["state"], json!("ONLINE"));
-    }
-
-    #[tokio::test]
-    async fn pipeline_replication_maps_vmid_to_guest() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/nodes/pve1/replication"))
-            .and(query_param("guest", "100"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": [{ "id": "100-0", "fail_count": 0 }]
-            })))
-            .mount(&server)
-            .await;
-        let p = nodes::ReplicationParams {
-            node: "pve1".into(),
-            vmid: Some(100),
-        };
-        let r = nodes::replication_list(&mock_client(&server.uri()), p)
-            .await
-            .unwrap();
-        assert_eq!(r[0]["id"], json!("100-0"));
-    }
-
-    #[tokio::test]
-    async fn cluster_level_tools_hit_their_endpoints() {
-        let server = MockServer::start().await;
-        for (p, body) in [
-            (
-                "/cluster/backup",
-                json!([{ "id": "backup-1", "schedule": "21:00" }]),
-            ),
-            (
-                "/cluster/backup-info/not-backed-up",
-                json!([{ "vmid": 105, "name": "scratch", "type": "qemu" }]),
-            ),
-            (
-                "/cluster/ha/status/current",
-                json!([{ "id": "quorum", "quorate": 1 }]),
-            ),
-            (
-                "/cluster/ha/resources",
-                json!([{ "sid": "vm:100", "state": "started" }]),
-            ),
-        ] {
-            Mock::given(method("GET"))
-                .and(path(p))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": body })))
-                .mount(&server)
-                .await;
-        }
-        let mcp = mock_server(&server.uri());
-        let results = [
-            mcp.proxmox_backup_jobs_list(args(json!({}))).await.unwrap(),
-            mcp.proxmox_guests_without_backup_list(args(json!({})))
-                .await
-                .unwrap(),
-            mcp.proxmox_ha_status_get(args(json!({}))).await.unwrap(),
-            mcp.proxmox_ha_resources_list(args(json!({})))
-                .await
-                .unwrap(),
-        ];
-        for (r, needle) in results
-            .iter()
-            .zip(["backup-1", "scratch", "quorum", "vm:100"])
-        {
-            assert_ne!(r.is_error, Some(true), "{}", text_of(r));
-            assert!(text_of(r).contains(needle), "{}", text_of(r));
-        }
+        assert!(text.contains("a, b (default: b)"), "{text}");
     }
 }

@@ -1,5 +1,5 @@
 use crate::client::{ProxmoxClient, ProxmoxError};
-use crate::tools::{NodeId, QueryBuilder, Upid, encode_seg};
+use crate::tools::params::{NodeId, QueryBuilder, Upid, encode_seg};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -165,32 +165,6 @@ pub async fn qemu_status(client: &ProxmoxClient, p: GuestParams) -> Result<Value
 /// running state's position in the snapshot tree).
 pub async fn qemu_snapshots(client: &ProxmoxClient, p: GuestParams) -> Result<Value, ProxmoxError> {
     let path = format!("/nodes/{}/qemu/{}/snapshot", encode_seg(&p.node), p.vmid);
-    client.get(&path, &[]).await
-}
-
-// --------------------------------------------------------------------------
-// LXC containers
-// --------------------------------------------------------------------------
-
-/// List LXC containers on one node. Reuses NodeParams (node only).
-pub async fn lxc_list(client: &ProxmoxClient, p: NodeParams) -> Result<Value, ProxmoxError> {
-    let path = format!("/nodes/{}/lxc", encode_seg(&p.node));
-    client.get(&path, &[]).await
-}
-
-/// Get the configuration of an LXC container.
-pub async fn lxc_config(client: &ProxmoxClient, p: GuestParams) -> Result<Value, ProxmoxError> {
-    let path = format!("/nodes/{}/lxc/{}/config", encode_seg(&p.node), p.vmid);
-    client.get(&path, &[]).await
-}
-
-/// Get the current runtime status of an LXC container.
-pub async fn lxc_status(client: &ProxmoxClient, p: GuestParams) -> Result<Value, ProxmoxError> {
-    let path = format!(
-        "/nodes/{}/lxc/{}/status/current",
-        encode_seg(&p.node),
-        p.vmid
-    );
     client.get(&path, &[]).await
 }
 
