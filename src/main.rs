@@ -89,15 +89,18 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = config::Config::load(args.config.as_deref())?;
-    let conn = cfg.resolve()?;
+    let clusters = cfg.resolve()?;
 
-    info!(
-        mode = "stdio",
-        proxmox_url = %conn.url,
-        insecure = conn.insecure,
-        "starting proxmox-mcp"
-    );
-    let server = tools::ProxmoxMcpServer::new(conn)?;
+    info!(mode = "stdio", default_cluster = %clusters.default, "starting proxmox-mcp");
+    for (name, conn) in &clusters.entries {
+        info!(
+            cluster = %name,
+            proxmox_url = %conn.url,
+            insecure = conn.insecure,
+            "configured cluster"
+        );
+    }
+    let server = tools::ProxmoxMcpServer::new(clusters)?;
     server
         .serve(rmcp::transport::io::stdio())
         .await?

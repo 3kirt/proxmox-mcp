@@ -41,6 +41,43 @@ user@example.com@pve!mcp=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 
 Don't truncate the first `@` segment.
 
+### Multiple clusters
+
+To serve several independent clusters from one server instance, use a
+`clusters` map instead of the top-level fields (the two forms can't be mixed):
+
+```json
+{
+  "default": "site-a",
+  "clusters": {
+    "site-a": {
+      "url": "https://pve-a.example.com:8006",
+      "token": "user@realm!mcp=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    },
+    "site-b": {
+      "url": "https://pve-b.example.com:8006",
+      "token": "user@realm!mcp=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+      "insecure": true
+    }
+  }
+}
+```
+
+- Every tool takes an optional `cluster` argument; omitting it uses `default`.
+  `default` may be left out when only one cluster is listed.
+- `proxmox_clusters_list` returns the configured names and URLs (never tokens).
+- `proxmox_guests_find` and `proxmox_cluster_resources_list` accept
+  `cluster: "*"` to query every cluster concurrently. The result is
+  `{ "guests" | "resources": [...], "unreachable": { "<name>": "<error>" } }`:
+  each item is tagged with its `cluster`, and a cluster that is down or rejects
+  its token is reported under `unreachable` instead of failing the call.
+- The `PROXMOX_*` env vars override the default cluster only.
+- Cluster names may use letters, digits, `-`, `_` and `.`. A malformed entry
+  (missing token, `http://` URL) stops startup; connection and auth failures
+  only affect calls to that cluster.
+- The legacy single-cluster form keeps working, and the cluster it describes
+  is named `default`.
+
 **Lock down the config file.** The server refuses to start if the file is
 world-readable, to keep the token from leaking:
 
@@ -59,6 +96,7 @@ pveum acl modify / -token 'monitoring@pve!mcp' -role PVEAuditor
 
 | Tool | Endpoint |
 |------|----------|
+| `proxmox_clusters_list` | — (configured clusters; no API call) |
 | `proxmox_version_get` | `/version` |
 | `proxmox_cluster_status_get` | `/cluster/status` |
 | `proxmox_cluster_resources_list` | `/cluster/resources` |
@@ -77,6 +115,18 @@ pveum acl modify / -token 'monitoring@pve!mcp' -role PVEAuditor
 | `proxmox_storage_content_list` | `/nodes/{node}/storage/{storage}/content` |
 | `proxmox_nodes_network_list` | `/nodes/{node}/network` |
 | `proxmox_nodes_network_get` | `/nodes/{node}/network/{iface}` |
+| `proxmox_tasks_status_get` | `/nodes/{node}/tasks/{upid}/status` (node read from the UPID) |
+| `proxmox_tasks_log_get` | `/nodes/{node}/tasks/{upid}/log` (last 50 lines by default) |
+| `proxmox_qemu_snapshots_list` | `/nodes/{node}/qemu/{vmid}/snapshot` |
+| `proxmox_backup_jobs_list` | `/cluster/backup` |
+| `proxmox_guests_without_backup_list` | `/cluster/backup-info/not-backed-up` |
+| `proxmox_ha_status_get` | `/cluster/ha/status/current` |
+| `proxmox_ha_resources_list` | `/cluster/ha/resources` |
+| `proxmox_disks_list` | `/nodes/{node}/disks/list` |
+| `proxmox_disks_smart_get` | `/nodes/{node}/disks/smart` |
+| `proxmox_disks_zfs_list` | `/nodes/{node}/disks/zfs` |
+| `proxmox_disks_zfs_get` | `/nodes/{node}/disks/zfs/{name}` |
+| `proxmox_replication_list` | `/nodes/{node}/replication` |
 
 `proxmox_cluster_resources_list` is the best starting point — it returns every VM,
 container, storage, and node across the cluster in a single call.

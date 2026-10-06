@@ -3,7 +3,7 @@ use crate::tools::QueryBuilder;
 use serde::Deserialize;
 use serde_json::Value;
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct ClusterResourcesParams {
     #[schemars(description = "Restrict to one resource type: vm, storage, node, or sdn")]
     pub r#type: Option<String>,
@@ -70,7 +70,7 @@ pub async fn cluster_tasks(
     Ok(Value::Array(tasks))
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct GuestFindParams {
     #[schemars(
         description = "Case-insensitive substring to match against guest names. Omit to list every guest cluster-wide."

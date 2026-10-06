@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Multiple clusters in one server instance** (#4). The config file accepts a
+  `clusters` map (name → `url`/`token`/`insecure`) plus a `default`; the
+  existing single-cluster form keeps working as a cluster named `default`.
+  Every tool takes an optional `cluster` argument (omit for the default), and
+  `PROXMOX_*` env vars override the default cluster only.
+- `proxmox_clusters_list` — the configured cluster names, URLs, `insecure`
+  flags, and which is the default (tokens are never returned).
+- `proxmox_guests_find` and `proxmox_cluster_resources_list` accept
+  `cluster: "*"` to query every cluster concurrently, tagging each result with
+  its `cluster`. A cluster that is down or rejects its token is reported under
+  `unreachable` rather than failing the whole call.
+- **Task drill-down:** `proxmox_tasks_status_get` and `proxmox_tasks_log_get`
+  take a task's `upid` (the node is read from it), so a failed backup or
+  migration found in a task list can be explained without leaving the client.
+  The log returns the last 50 lines by default, or a page via `start`/`limit`.
+- `proxmox_qemu_snapshots_list` — a VM's snapshots and the snapshot tree.
+- **Backups:** `proxmox_backup_jobs_list` (scheduled vzdump jobs) and
+  `proxmox_guests_without_backup_list` (guests no job covers).
+- **High availability:** `proxmox_ha_status_get` (manager, quorum, per-guest
+  state) and `proxmox_ha_resources_list` (HA-managed guests).
+- **Disk health:** `proxmox_disks_list` (disks with SMART health and SSD
+  wear-out), `proxmox_disks_smart_get`, `proxmox_disks_zfs_list`, and
+  `proxmox_disks_zfs_get` (`zpool status`-style detail).
+- `proxmox_replication_list` — replication job status per node, optionally for
+  one guest.
+- All new tools work with the `PVEAuditor` role.
+
+### Changed
+- With more than one cluster configured, tool error messages are prefixed with
+  the cluster name (`[site-b] getting VM config: …`), and the server
+  instructions list the configured clusters.
+- `Connection`'s `Debug` output redacts the API token.
+- **rmcp 3.1 → 3.5.** `get_info` now uses `ServerConfig` (the deprecated
+  `ServerInfo` alias's replacement; same type). rmcp 3.5.1 also started
+  returning undeserializable tool arguments as an in-band error result rather
+  than a JSON-RPC invalid-params error, which bypassed the "Expected fields: …"
+  hint appended to those errors; the `call_tool` override now enriches both
+  forms. Also refreshed `clap`, `reqwest`, `thiserror`, and `tokio` to their
+  latest patch releases.
+
+### Security
+- Updated `rustls` to 0.23.45 (RUSTSEC-2026-0285, medium: TLS 1.3 handshake
+  messages accepted across encryption-level boundaries) and `h2` to 0.4.16
+  (RUSTSEC-2026-0258: unbounded empty DATA frames), both pulled in via
+  `reqwest`. This also replaces the yanked `chacha20` 0.10.1.
+
 ## [0.10.0] — 2026-08-06
 
 Upgrade to rmcp 3.x.

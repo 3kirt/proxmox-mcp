@@ -31,10 +31,11 @@ endpoints are wrapped.
 ```
 src/
   main.rs          — CLI (clap), tracing, stdio serve loop
-  config.rs        — Config::load(~/.proxmox_mcp.json) + env override → Connection{url,token,insecure}
+  config.rs        — Config::load(~/.proxmox_mcp.json) + env override → Clusters{default, name → Connection}
   client.rs        — reqwest wrapper; get(path,params) -> unwrapped `data` Value; ProxmoxError
   tools/
-    mod.rs         — ProxmoxMcpServer, QueryBuilder, encode_seg(), json_result(), #[tool] shims, ServerHandler
+    mod.rs         — ProxmoxMcpServer (one client per cluster), QueryBuilder, encode_seg(), json_result(), #[tool] shims, ServerHandler
+    scope.rs       — Scoped<P>/AnyScoped<P>: flatten the optional `cluster` arg beside domain params
     slim.rs        — slim_value(): drops null fields recursively
     cluster.rs     — cluster-scoped domain fns + param structs
     nodes.rs       — node/qemu/lxc/storage domain fns + param structs
@@ -52,7 +53,7 @@ src/
 ## Adding a tool
 
 1. Add a `*Params` struct (schemars-described) + an async domain fn in `tools/cluster.rs` or `tools/nodes.rs` that builds the path/query and calls `client.get`.
-2. Add a `#[tool(... annotations(read_only_hint = true, open_world_hint = false))]` shim in `tools/mod.rs` using the `respond!` macro (or `get_simple` for fixed zero-param paths). The `annotations(...)` is mandatory — the `every_tool_is_annotated_read_only` test fails closed if a new tool omits it or ships a write-capable hint.
+2. Add a `#[tool(... annotations(read_only_hint = true, open_world_hint = false))]` shim in `tools/mod.rs` taking `Parameters<Scoped<YourParams>>` and using the `respond!` macro (or `get_simple` with `Scoped<NoParams>` for fixed zero-param paths). Domain fns never see `cluster`; the shim resolves it to a client. Use `AnyScoped` + `respond_any!` only for cluster-wide list tools whose results make sense merged across clusters (`cluster: "*"`). The `annotations(...)` is mandatory — the `every_tool_is_annotated_read_only` test fails closed if a new tool omits it or ships a write-capable hint.
 3. No routing table to update — `#[tool_router]` handles registration.
 
 The full Proxmox API schema is at `~/source/repos/pve-docs/api-viewer/apidata.js`
