@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Internal
+- Lints clean on Rust 1.99: clippy's new `unused_async_trait_impl` lint is
+  allowed on the `ServerHandler` impl, where it fires on the `list_tools` that
+  rmcp's `#[tool_handler]` macro generates.
+- The release workflow now runs the full CI checks (tests, clippy, fmt) as a
+  required job before building, so a tag whose lint or tests fail no longer
+  publishes a release. `/release` updates the local stable toolchain first and
+  lints with `--all-targets`, matching CI.
+
 ## [0.11.0] — 2026-10-05
 
 Multi-cluster support, task/backup/HA/disk-health tools, and rmcp 3.5. Removes

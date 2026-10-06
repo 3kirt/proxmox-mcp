@@ -670,9 +670,8 @@ impl ProxmoxMcpServer {
 // ServerHandler
 // --------------------------------------------------------------------------
 
-// `#[tool_handler]` generates an `async fn list_tools` with no `.await`, which
-// clippy >= 1.99 flags; `unknown_lints` keeps older clippy from rejecting the name.
-#[allow(unknown_lints, clippy::unused_async_trait_impl)]
+// `#[tool_handler]` generates an `async fn list_tools` with no `.await`.
+#[allow(clippy::unused_async_trait_impl)]
 #[tool_handler]
 impl ServerHandler for ProxmoxMcpServer {
     fn get_info(&self) -> ServerConfig {

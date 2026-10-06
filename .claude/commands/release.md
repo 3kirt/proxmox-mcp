@@ -50,12 +50,21 @@ cargo install cargo-audit
 
 ### 5. Run the full quality gate — all four checks must pass
 
-Run these commands. If any fails, stop and report the error; do not proceed to
-tagging.
+CI and the release workflow lint with the latest stable Rust, so first bring the
+local toolchain up to date — otherwise a newer clippy in CI can fail lints that
+pass locally:
+
+```
+rustup update stable
+```
+
+Then run these commands. If any fails, stop and report the error; do not proceed
+to tagging. They match the checks in `.github/workflows/ci.yml`, which the
+release workflow also runs before building.
 
 ```
 cargo test --all --locked
-cargo clippy --locked -- -D warnings
+cargo clippy --all-targets --locked -- -D warnings
 cargo fmt --check
 cargo build --release
 ```

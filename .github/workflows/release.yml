@@ -10,8 +10,13 @@ permissions:
   packages: write
 
 jobs:
+  checks:
+    name: Checks
+    uses: ./.github/workflows/ci.yml
+
   build:
     name: Build ${{ matrix.artifact }}
+    needs: checks
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
