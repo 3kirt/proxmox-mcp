@@ -85,6 +85,73 @@ impl Upid {
     }
 }
 
+/// A closed set of string values for a tool argument. The allowed values land
+/// in the JSON schema as an inlined `enum`, so the caller sees them up front
+/// and serde rejects anything else before a request is sent. `Display` yields
+/// the wire value, so it plugs straight into [`QueryBuilder::opt`].
+macro_rules! string_enum {
+    ($(#[$attr:meta])* $name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
+        $(#[$attr])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+        #[schemars(inline)]
+        pub enum $name {
+            $(#[serde(rename = $value)] $variant),+
+        }
+
+        impl $name {
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $value),+
+                }
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+    };
+}
+
+string_enum!(
+    /// `type` filter of `/cluster/resources`.
+    ResourceType {
+        Vm => "vm",
+        Storage => "storage",
+        Node => "node",
+        Sdn => "sdn",
+    }
+);
+
+string_enum!(
+    /// `type` filter of `/nodes/{node}/disks/list`.
+    DiskType {
+        Unused => "unused",
+        JournalDisks => "journal_disks",
+    }
+);
+
+string_enum!(
+    /// `type` filter of `/nodes/{node}/network`.
+    NetworkType {
+        Bridge => "bridge",
+        Bond => "bond",
+        Eth => "eth",
+        Alias => "alias",
+        Vlan => "vlan",
+        Fabric => "fabric",
+        OvsBridge => "OVSBridge",
+        OvsBond => "OVSBond",
+        OvsPort => "OVSPort",
+        OvsIntPort => "OVSIntPort",
+        Vnet => "vnet",
+        AnyBridge => "any_bridge",
+        AnyLocalBridge => "any_local_bridge",
+        IncludeSdn => "include_sdn",
+    }
+);
+
 /// The `cluster` value that selects every configured cluster.
 pub const ALL_CLUSTERS: &str = "*";
 

@@ -23,9 +23,11 @@ use params::{ALL_CLUSTERS, AnyScoped, NoParams, Scoped};
 // Shared helpers
 // --------------------------------------------------------------------------
 
+/// Serialize a tool's payload as compact JSON: the reader is an LLM, and
+/// indentation is pure token cost.
 fn json_result(v: Value) -> Result<CallToolResult, McpError> {
     let v = slim_value(humanize_value(v));
-    let text = serde_json::to_string_pretty(&v)
+    let text = serde_json::to_string(&v)
         .map_err(|e| McpError::internal_error(format!("marshalling response: {e}"), None))?;
     Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
 }
@@ -83,6 +85,25 @@ fn enrich_argument_error(mut result: CallToolResult, tool: Option<&Tool>) -> Cal
         text.text.push_str(&suffix);
     }
     result
+}
+
+/// Race a tool call against the client's `notifications/cancelled`.
+///
+/// rmcp only *signals* cancellation (via `RequestContext::ct`); it never aborts
+/// the handler future, so a cancelled call would otherwise run to completion
+/// (up to the request timeout, or across every cluster for `cluster: "*"`).
+/// Dropping the tool future here also drops any in-flight `reqwest` request.
+async fn run_cancellable<T>(
+    call: impl Future<Output = Result<T, McpError>>,
+    cancelled: impl Future<Output = ()>,
+) -> Result<T, McpError> {
+    tokio::select! {
+        result = call => result,
+        () = cancelled => {
+            tracing::debug!("tool call cancelled by client");
+            Err(McpError::internal_error("tool call cancelled by client", None))
+        }
+    }
 }
 
 fn expected_fields_suffix(tool: Option<&Tool>) -> Option<String> {
@@ -670,8 +691,10 @@ impl ProxmoxMcpServer {
 // ServerHandler
 // --------------------------------------------------------------------------
 
-// `#[tool_handler]` generates an `async fn list_tools` with no `.await`.
-#[allow(clippy::unused_async_trait_impl)]
+#[expect(
+    clippy::unused_async_trait_impl,
+    reason = "`#[tool_handler]` generates an `async fn list_tools` with no `.await`"
+)]
 #[tool_handler]
 impl ServerHandler for ProxmoxMcpServer {
     fn get_info(&self) -> ServerConfig {
@@ -716,9 +739,10 @@ impl ServerHandler for ProxmoxMcpServer {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let tool_name = request.name.clone();
+        let ct = context.ct.clone();
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         let tool = || self.tool_router.get(&tool_name);
-        match self.tool_router.call(tcc).await {
+        match run_cancellable(self.tool_router.call(tcc), ct.cancelled()).await {
             Ok(CallToolResponse::Complete(result)) => Ok(CallToolResponse::Complete(
                 enrich_argument_error(result, tool()),
             )),
@@ -974,6 +998,99 @@ mod tests {
         let err = serde_json::from_value::<Scoped<nodes::TaskParams>>(json!({ "upid": "nope" }))
             .unwrap_err();
         assert!(err.to_string().contains("invalid task UPID"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn run_cancellable_drops_call_on_cancel() {
+        // A call that never completes on its own must be abandoned as soon as
+        // the cancel signal fires, and its future dropped.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let dropped = Arc::new(AtomicBool::new(false));
+        let flag = DropFlag(dropped.clone());
+        let call = async move {
+            let _flag = flag;
+            std::future::pending::<Result<(), McpError>>().await
+        };
+        let err = run_cancellable(call, std::future::ready(()))
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("cancelled"), "{}", err.message);
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn run_cancellable_passes_through_without_cancel() {
+        let out = run_cancellable(async { Ok::<_, McpError>(7) }, std::future::pending::<()>())
+            .await
+            .unwrap();
+        assert_eq!(out, 7);
+    }
+
+    #[tokio::test]
+    async fn tool_output_is_compact_json() {
+        let server = MockServer::start().await;
+        mount_data(
+            &server,
+            "/version",
+            &[],
+            json!({ "release": "9.2", "repoid": "abc" }),
+        )
+        .await;
+        let result = mock_server(&server.uri())
+            .proxmox_version_get(args(json!({})))
+            .await
+            .unwrap();
+        let text = text_of(&result);
+        assert!(!text.contains('\n') && !text.contains(": "), "{text}");
+        assert_eq!(
+            serde_json::from_str::<Value>(text).unwrap()["release"],
+            "9.2"
+        );
+    }
+
+    #[test]
+    fn closed_value_filters_advertise_an_inline_enum() {
+        for (tool, value) in [
+            ("proxmox_cluster_resources_list", "sdn"),
+            ("proxmox_disks_list", "journal_disks"),
+            ("proxmox_nodes_network_list", "OVSBridge"),
+        ] {
+            let f = &input_schema(tool)["properties"]["type"];
+            assert!(f.get("$ref").is_none(), "{tool}: type must be inlined: {f}");
+            assert!(f["enum"].as_array().unwrap().contains(&json!(value)), "{f}");
+        }
+    }
+
+    #[test]
+    fn out_of_range_arguments_are_rejected_before_any_request() {
+        let bad = [json!({ "type": "vms" }), json!({ "type": "VM" })];
+        for v in bad {
+            assert!(
+                serde_json::from_value::<AnyScoped<cluster::ClusterResourcesParams>>(v.clone())
+                    .is_err(),
+                "{v}"
+            );
+        }
+        for v in [
+            json!({ "upid": "UPID:pve1:1:2:3:x:1:r@pam:", "limit": -1 }),
+            json!({ "upid": "UPID:pve1:1:2:3:x:1:r@pam:", "start": -1 }),
+        ] {
+            assert!(
+                serde_json::from_value::<Scoped<nodes::TaskLogParams>>(v.clone()).is_err(),
+                "{v}"
+            );
+        }
+        let err = serde_json::from_value::<Scoped<nodes::GuestParams>>(
+            json!({ "node": "pve1", "vmid": -100 }),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("u32"), "{err}");
     }
 
     // ------------------------------------------------------------------

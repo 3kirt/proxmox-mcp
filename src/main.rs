@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let server = tools::ProxmoxMcpServer::new(clusters)?;
     server
-        .serve(rmcp::transport::io::stdio())
+        .serve(rmcp::transport::io::stdio_pipes())
         .await?
         .waiting()
         .await?;

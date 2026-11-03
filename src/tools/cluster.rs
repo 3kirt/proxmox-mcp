@@ -1,12 +1,12 @@
 use crate::client::{ProxmoxClient, ProxmoxError};
-use crate::tools::params::QueryBuilder;
+use crate::tools::params::{QueryBuilder, ResourceType};
 use serde::Deserialize;
 use serde_json::Value;
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct ClusterResourcesParams {
-    #[schemars(description = "Restrict to one resource type: vm, storage, node, or sdn")]
-    pub r#type: Option<String>,
+    #[schemars(description = "Restrict to one resource type")]
+    pub r#type: Option<ResourceType>,
 }
 
 /// Cluster-wide resource index — the single best inventory call. Lists every
@@ -22,7 +22,7 @@ pub async fn cluster_resources(
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ClusterTasksParams {
     #[schemars(description = "Cap the number of tasks returned (default 50, most recent first)")]
-    pub limit: Option<i32>,
+    pub limit: Option<u32>,
     #[schemars(description = "Only return tasks that finished with an error (status != OK)")]
     pub errors: Option<bool>,
     #[schemars(description = "Only return tasks started at or after this UNIX epoch")]
@@ -65,7 +65,7 @@ pub async fn cluster_tasks(
         });
     }
 
-    let limit = usize::try_from(p.limit.unwrap_or(50)).unwrap_or(0);
+    let limit = usize::try_from(p.limit.unwrap_or(50)).unwrap_or(usize::MAX);
     tasks.truncate(limit);
     Ok(Value::Array(tasks))
 }
@@ -84,7 +84,10 @@ pub struct GuestFindParams {
 /// replaces a full cluster dump scanned by hand.
 pub async fn guest_find(client: &ProxmoxClient, p: GuestFindParams) -> Result<Value, ProxmoxError> {
     let data = client
-        .get("/cluster/resources", &[("type", "vm".to_string())])
+        .get(
+            "/cluster/resources",
+            &[("type", ResourceType::Vm.to_string())],
+        )
         .await?;
     let Value::Array(mut guests) = data else {
         return Ok(data);

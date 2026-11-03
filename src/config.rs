@@ -10,7 +10,12 @@ pub const LEGACY_CLUSTER_NAME: &str = "default";
 
 /// Raw config as loaded from the JSON file. Either the legacy single-cluster
 /// fields or `clusters` (+ optional `default`) may be used, not both.
-#[derive(Debug, Default, Deserialize)]
+/// Unknown keys are rejected so a typo (`"insecue"`, `"cluster"`) fails loudly
+/// instead of silently falling back to a default.
+///
+/// Deliberately not `Debug`: it carries the token in plain text.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawConfig {
     url: Option<String>,
     token: Option<String>,
@@ -19,11 +24,23 @@ struct RawConfig {
     clusters: Option<BTreeMap<String, RawCluster>>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawCluster {
     url: Option<String>,
     token: Option<String>,
     insecure: Option<bool>,
+}
+
+/// Redacts the token, so `Debug` on a loaded [`Config`] never prints it.
+impl std::fmt::Debug for RawCluster {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawCluster")
+            .field("url", &self.url)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("insecure", &self.insecure)
+            .finish()
+    }
 }
 
 /// Resolved Proxmox connection settings, ready to build a client.
@@ -65,25 +82,36 @@ pub struct Config {
 }
 
 impl Config {
-    /// Load configuration from path (default: `~/.proxmox_mcp.json`).
-    /// A missing file is not an error.
+    /// Load configuration from `path`, or from `~/.proxmox_mcp.json` when
+    /// `None`. Only the default file may be absent (env vars can stand in for
+    /// it); an explicitly named file must exist, so a typo'd `--config` fails
+    /// loudly instead of silently falling back to env vars.
     pub fn load(path: Option<&Path>) -> anyhow::Result<Self> {
-        let resolved = match path {
-            Some(p) => p.to_path_buf(),
-            None => default_config_path()?,
+        match path {
+            Some(p) => Self::load_file(p, true),
+            None => Self::load_file(&default_config_path()?, false),
+        }
+    }
+
+    fn load_file(path: &Path, required: bool) -> anyhow::Result<Self> {
+        // Read first rather than probing with `exists()`, which reports `false`
+        // for *any* error (e.g. permission denied) and would mask an unreadable
+        // file as a missing one.
+        let contents = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) if !required && e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("reading config file {}", path.display()));
+            }
         };
 
-        if !resolved.exists() {
-            return Ok(Self::default());
-        }
+        check_file_permissions(path)?;
 
-        check_file_permissions(&resolved)?;
-
-        let contents = std::fs::read_to_string(&resolved)
-            .with_context(|| format!("reading config file {}", resolved.display()))?;
         let raw: RawConfig = serde_json::from_str(&contents)
-            .with_context(|| format!("parsing config file {}", resolved.display()))?;
-        Self::from_raw(raw).with_context(|| format!("invalid config file {}", resolved.display()))
+            .with_context(|| format!("parsing config file {}", path.display()))?;
+        Self::from_raw(raw).with_context(|| format!("invalid config file {}", path.display()))
     }
 
     fn from_raw(raw: RawConfig) -> anyhow::Result<Self> {
@@ -254,7 +282,7 @@ fn default_config_path() -> anyhow::Result<PathBuf> {
 }
 
 /// Reject world-readable config files on Unix to avoid token exposure.
-#[allow(unused_variables)]
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn check_file_permissions(path: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
@@ -341,10 +369,31 @@ mod tests {
     }
 
     #[test]
-    fn missing_file_returns_empty() {
-        let cfg = Config::load(Some(Path::new("/nonexistent/path.json"))).unwrap();
+    fn missing_default_file_returns_empty() {
+        let cfg = Config::load_file(Path::new("/nonexistent/path.json"), false).unwrap();
         assert!(cfg.clusters.is_empty());
         assert!(cfg.default.is_none());
+    }
+
+    #[test]
+    fn missing_explicit_file_is_error() {
+        let err = Config::load(Some(Path::new("/nonexistent/path.json"))).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("/nonexistent/path.json"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn unknown_keys_are_rejected() {
+        let err =
+            load_str(r#"{"url":"https://x.example.com","token":"t","insecue":true}"#).unwrap_err();
+        assert!(format!("{err:#}").contains("insecue"), "{err:#}");
+        let err = load_str(
+            r#"{"clusters":{"a":{"url":"https://a.example.com","token":"t","verify":false}}}"#,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("verify"), "{err:#}");
     }
 
     #[test]
@@ -552,6 +601,17 @@ mod tests {
         };
         let dbg = format!("{conn:?}");
         assert!(!dbg.contains("supersecret"), "{dbg}");
+    }
+
+    #[test]
+    fn config_debug_redacts_tokens() {
+        let cfg = load_str(
+            r#"{"clusters":{"a":{"url":"https://a.example.com","token":"a@pam!t=supersecret"}}}"#,
+        )
+        .unwrap();
+        let dbg = format!("{cfg:?}");
+        assert!(!dbg.contains("supersecret"), "{dbg}");
+        assert!(dbg.contains("<redacted>"), "{dbg}");
     }
 
     #[test]

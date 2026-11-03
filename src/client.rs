@@ -66,11 +66,14 @@ impl ProxmoxClient {
         } = conn;
         // Proxmox uses "PVEAPIToken=USER@REALM!TOKENID=UUID", not "Bearer".
         let auth = format!("PVEAPIToken={token}");
-        let auth_value = header::HeaderValue::from_str(&auth).map_err(|_| {
+        let mut auth_value = header::HeaderValue::from_str(&auth).map_err(|_| {
             anyhow::anyhow!(
                 "Proxmox token contains characters not valid in HTTP headers (must be visible ASCII)"
             )
         })?;
+        // Keeps the token out of `Debug` output and out of HTTP/2 HPACK
+        // dynamic tables (where header values could otherwise be inferred).
+        auth_value.set_sensitive(true);
 
         let mut headers = header::HeaderMap::new();
         headers.insert(header::AUTHORIZATION, auth_value);

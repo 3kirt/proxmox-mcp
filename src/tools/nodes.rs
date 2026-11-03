@@ -1,5 +1,5 @@
 use crate::client::{ProxmoxClient, ProxmoxError};
-use crate::tools::params::{NodeId, QueryBuilder, Upid, encode_seg};
+use crate::tools::params::{DiskType, NetworkType, NodeId, QueryBuilder, Upid, encode_seg};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -22,7 +22,7 @@ pub async fn node_status(client: &ProxmoxClient, p: NodeParams) -> Result<Value,
 pub struct NodeTasksParams {
     pub node: NodeId,
     #[schemars(description = "Only list this number of tasks (default 50)")]
-    pub limit: Option<i32>,
+    pub limit: Option<u32>,
     #[schemars(description = "Only list tasks with an ERROR status")]
     pub errors: Option<bool>,
     #[schemars(description = "Only list tasks since this UNIX epoch")]
@@ -62,11 +62,11 @@ pub async fn task_status(client: &ProxmoxClient, p: TaskParams) -> Result<Value,
 pub struct TaskLogParams {
     pub upid: Upid,
     #[schemars(description = "Number of lines to return (default 50)")]
-    pub limit: Option<i64>,
+    pub limit: Option<u32>,
     #[schemars(
         description = "0-based line to start from. Omit to get the LAST `limit` lines, where a failure's error message usually is."
     )]
-    pub start: Option<i64>,
+    pub start: Option<u32>,
 }
 
 /// Upper bound on lines fetched to slice the log client-side; far above any
@@ -94,10 +94,10 @@ pub async fn task_log(client: &ProxmoxClient, p: TaskLogParams) -> Result<Value,
         .collect();
 
     let total = lines.len();
-    let limit = usize::try_from(p.limit.unwrap_or(50)).unwrap_or(0);
+    let limit = usize::try_from(p.limit.unwrap_or(50)).unwrap_or(usize::MAX);
     let start = p.start.map_or_else(
         || total.saturating_sub(limit),
-        |s| usize::try_from(s).unwrap_or(0).min(total),
+        |s| usize::try_from(s).unwrap_or(usize::MAX).min(total),
     );
     let end = start.saturating_add(limit).min(total);
     Ok(json!({
@@ -142,7 +142,7 @@ pub async fn qemu_list(client: &ProxmoxClient, p: QemuListParams) -> Result<Valu
 pub struct GuestParams {
     pub node: NodeId,
     #[schemars(description = "Numeric guest ID (VMID)")]
-    pub vmid: i64,
+    pub vmid: u32,
 }
 
 /// Get the configuration of a QEMU VM (current values plus pending changes).
@@ -204,7 +204,7 @@ pub struct StorageContentParams {
     #[schemars(description = "Only list content of this type (e.g. images, iso, backup, vztmpl)")]
     pub content: Option<String>,
     #[schemars(description = "Only list images belonging to this VMID")]
-    pub vmid: Option<i64>,
+    pub vmid: Option<u32>,
 }
 
 /// List the content (disk images, ISOs, backups, templates) of one storage.
@@ -235,8 +235,8 @@ pub struct DisksListParams {
     pub include_partitions: Option<bool>,
     #[schemars(description = "Skip the SMART health check (faster; health is omitted)")]
     pub skipsmart: Option<bool>,
-    #[schemars(description = "Only list disks of this kind: unused or journal_disks")]
-    pub r#type: Option<String>,
+    #[schemars(description = "Only list disks of this kind")]
+    pub r#type: Option<DiskType>,
 }
 
 /// List a node's physical disks with model, size, usage, SMART health and SSD wear.
@@ -303,7 +303,7 @@ pub async fn zfs_get(client: &ProxmoxClient, p: ZfsPoolParams) -> Result<Value, 
 pub struct ReplicationParams {
     pub node: NodeId,
     #[schemars(description = "Only list replication jobs for this guest ID (VMID)")]
-    pub vmid: Option<i64>,
+    pub vmid: Option<u32>,
 }
 
 /// Status of the replication jobs running on one node: last/next sync,
@@ -324,11 +324,8 @@ pub async fn replication_list(
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct NetworkListParams {
     pub node: NodeId,
-    #[schemars(
-        description = "Only list interfaces of this type: bridge, bond, eth, alias, vlan, \
-                       OVSBridge, OVSBond, OVSPort, OVSIntPort, vnet, or any_bridge"
-    )]
-    pub r#type: Option<String>,
+    #[schemars(description = "Only list interfaces of this type")]
+    pub r#type: Option<NetworkType>,
 }
 
 /// List the network interfaces, bridges, bonds, and VLANs configured on a node.
