@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-11-02
+
+Security dependency updates, stricter config and argument validation,
+cancellation support, and compact tool output.
+
+### Changed
+- **Tool output is compact JSON** instead of pretty-printed, cutting the token
+  cost of every response. The content is unchanged.
+- **Closed-value filters advertise their allowed values.** The `type` filter of
+  `proxmox_cluster_resources_list`, `proxmox_disks_list`, and
+  `proxmox_nodes_network_list` is now an `enum` in the tool schema, and an
+  unknown value is rejected with the list of valid ones. The network filter
+  gains `fabric`, `any_local_bridge`, and `include_sdn` (per the PVE 9.2 API).
+- **`limit`, `start`, and `vmid` must be non-negative.** The schema advertises
+  `minimum: 0`; a negative value is rejected up front instead of being clamped
+  to 0 or passed through to Proxmox.
+- A client's `notifications/cancelled` now stops the tool call at once and
+  drops its in-flight Proxmox request, instead of letting it run to completion.
+- The stdio transport uses rmcp's `stdio_pipes` (non-blocking pipe I/O on
+  Linux; unchanged elsewhere). Requires rmcp 3.8.
+
+### Fixed
+- An explicit `--config` path that doesn't exist is now an error, instead of
+  being silently ignored in favor of env vars. Only the default
+  `~/.proxmox_mcp.json` may be absent, and an unreadable config file reports
+  its real I/O error rather than being treated as missing.
+- Unknown keys in the config file are rejected, so a typo such as `"insecue"`
+  or `"cluster"` fails at startup instead of silently resolving to a default.
+
+### Security
+- Dependency updates clear RUSTSEC-2026-0346, -0347, -0348, and -0349
+  (rustls 0.23.46), RUSTSEC-2026-0382 (rustls-webpki 0.103.16),
+  RUSTSEC-2026-0383 (webpki-root-certs 1.0.11), and the RUSTSEC-2026-0386
+  unsoundness warning (tokio 1.54.1).
+- The `PVEAPIToken` header is marked sensitive, and the raw config's `Debug`
+  output redacts tokens.
+
+### Internal
+- New `cargo audit` CI job, which also gates releases.
+- Declares `rust-version = 1.88`; license identifier is now `GPL-3.0-only`.
+
 ## [0.12.0] — 2026-10-05
 
 Build and release pipeline fixes only; tools and behavior are unchanged.
