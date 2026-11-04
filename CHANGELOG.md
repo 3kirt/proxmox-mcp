@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-11-03
+
+Per-cluster config files, cluster-aware tool schemas, and `"*"` on more tools.
+
 **Breaking:** cluster configuration moved from `~/.proxmox_mcp.json` to a
 directory with one file per cluster. See "Migrating" below.
 
