@@ -17,7 +17,7 @@ use slim::{humanize_value, slim_value};
 pub mod cluster;
 pub mod nodes;
 pub mod params;
-use params::{ALL_CLUSTERS, AnyScoped, NoParams, Scoped};
+use params::{ALL_CLUSTERS, AnyScoped, CLUSTER_SELECTOR_DESCRIPTION, NoParams, Scoped};
 
 // --------------------------------------------------------------------------
 // Shared helpers
@@ -111,6 +111,46 @@ fn expected_fields_suffix(tool: Option<&Tool>) -> Option<String> {
     Some(format!(". Expected fields: {summary}"))
 }
 
+/// Fit a tool's `cluster` argument to the configured clusters, returning
+/// whether the tool accepts `"*"`.
+///
+/// The `#[tool]` schemas are generated at compile time with a generic
+/// description. With one cluster the argument can only ever mean that cluster,
+/// so it is dropped from the schema (omitting it still works). With several,
+/// it becomes an `enum` of the configured names — plus `"*"` on fan-out tools —
+/// and the description names the default, so a caller sees every valid choice
+/// without a `proxmox_clusters_list` round trip.
+fn adapt_cluster_param(tool: &mut Tool, cluster_names: &[&str], default: &str) -> bool {
+    let schema = Arc::make_mut(&mut tool.input_schema);
+    let Some(Value::Object(props)) = schema.get_mut("properties") else {
+        return false;
+    };
+    let Some(cluster) = props.get("cluster") else {
+        return false;
+    };
+    let fan_out =
+        cluster.get("description").and_then(Value::as_str) == Some(CLUSTER_SELECTOR_DESCRIPTION);
+
+    if cluster_names.len() <= 1 {
+        props.remove("cluster");
+        return fan_out;
+    }
+    let mut choices: Vec<&str> = cluster_names.to_vec();
+    let mut description =
+        format!("Proxmox cluster to query. Omit to use the default cluster ({default}).");
+    if fan_out {
+        choices.push(ALL_CLUSTERS);
+        description.push_str(
+            " \"*\" queries every cluster concurrently and tags each result with its cluster.",
+        );
+    }
+    props.insert(
+        "cluster".to_string(),
+        json!({ "type": "string", "enum": choices, "description": description }),
+    );
+    fan_out
+}
+
 // --------------------------------------------------------------------------
 // Server struct
 // --------------------------------------------------------------------------
@@ -131,9 +171,14 @@ struct ClusterSet {
 #[derive(Clone)]
 pub struct ProxmoxMcpServer {
     clusters: Arc<ClusterSet>,
-    /// Held so the `call_tool` override can look up a tool's schema to enrich
-    /// invalid-params errors; reused per call rather than rebuilt each time.
+    /// The router, with every `cluster` argument adapted to the configured
+    /// clusters (see [`adapt_cluster_param`]). `#[tool_handler]`'s generated
+    /// `list_tools`/`get_tool` and the `call_tool` override all read it, so
+    /// the advertised schemas and the argument-error hints agree.
     tool_router: ToolRouter<Self>,
+    /// Tools that accept `cluster: "*"`, sorted, comma-separated — derived
+    /// from the schemas so error messages and instructions can't drift.
+    fan_out_tools: Arc<str>,
 }
 
 impl ProxmoxMcpServer {
@@ -155,13 +200,28 @@ impl ProxmoxMcpServer {
                     },
                 ))
             })
-            .collect::<anyhow::Result<_>>()?;
+            .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+
+        let mut tool_router = Self::tool_router();
+        let names: Vec<&str> = entries.keys().map(String::as_str).collect();
+        let mut fan_out: Vec<&str> = tool_router
+            .map
+            .values_mut()
+            .filter_map(|route| {
+                adapt_cluster_param(&mut route.attr, &names, &clusters.default)
+                    .then(|| route.name())
+            })
+            .collect();
+        fan_out.sort_unstable();
+        let fan_out_tools = Arc::from(fan_out.join(", "));
+
         Ok(Self {
             clusters: Arc::new(ClusterSet {
                 default: clusters.default,
                 entries,
             }),
-            tool_router: Self::tool_router(),
+            tool_router,
+            fan_out_tools,
         })
     }
 
@@ -187,8 +247,8 @@ impl ProxmoxMcpServer {
         }
         if name == ALL_CLUSTERS {
             return Err(format!(
-                "cluster \"*\" is only supported by proxmox_guests_find and \
-                 proxmox_cluster_resources_list; pass one cluster name ({})",
+                "cluster \"*\" is only supported by {}; pass one cluster name ({})",
+                self.fan_out_tools,
                 self.cluster_names()
             ));
         }
@@ -277,6 +337,36 @@ impl ProxmoxMcpServer {
         P: Clone,
         Fut: Future<Output = Result<Value, ProxmoxError>>,
     {
+        self.any_scoped_merged(args, noun, key, f, |_| {}).await
+    }
+
+    /// [`Self::any_scoped`] for fixed-path tools that take only `cluster`.
+    async fn get_any(
+        &self,
+        args: AnyScoped<NoParams>,
+        path: &'static str,
+        noun: &str,
+        key: &str,
+    ) -> Result<CallToolResult, McpError> {
+        self.any_scoped(args, noun, key, |client, _| client.get(path, &[]))
+            .await
+    }
+
+    /// [`Self::any_scoped`] with a `merge` step run over the combined items of a
+    /// `"*"` call — e.g. to restore a global sort order and limit that each
+    /// cluster could only apply to its own results.
+    async fn any_scoped_merged<'s, P, Fut>(
+        &'s self,
+        args: AnyScoped<P>,
+        noun: &str,
+        key: &str,
+        f: impl Fn(&'s ProxmoxClient, P) -> Fut,
+        merge: impl FnOnce(&mut Vec<Value>),
+    ) -> Result<CallToolResult, McpError>
+    where
+        P: Clone,
+        Fut: Future<Output = Result<Value, ProxmoxError>>,
+    {
         if args.cluster.as_deref() != Some(ALL_CLUSTERS) {
             return self
                 .call(args.cluster.as_deref(), noun, args.inner, f)
@@ -312,6 +402,7 @@ impl ProxmoxMcpServer {
                 Value::Object(unreachable)
             )));
         }
+        merge(&mut items);
         let mut out = serde_json::Map::new();
         out.insert(key.to_string(), Value::Array(items));
         if !unreachable.is_empty() {
@@ -391,15 +482,22 @@ impl ProxmoxMcpServer {
     }
 
     #[tool(
-        description = "List recent tasks (jobs/operations — backups, migrations, snapshots, start/stop) across the whole cluster, most recent first. Use this for \"what happened recently\" or to hunt failures. Filters: limit (default 50), errors (only failures), since (UNIX epoch), node. For a single node, use proxmox_nodes_tasks_list.",
+        description = "List recent tasks (jobs/operations — backups, migrations, snapshots, start/stop) across the whole cluster, most recent first. Use this for \"what happened recently\" or to hunt failures. Filters: limit (default 50), errors (only failures), since (UNIX epoch), node. For a single node, use proxmox_nodes_tasks_list. With cluster \"*\", queries every configured cluster and returns {tasks: [...newest first across all clusters, each tagged with cluster], unreachable: {cluster: error}}; limit then applies to the merged list.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_cluster_tasks_list(
         &self,
-        Parameters(p): Parameters<Scoped<cluster::ClusterTasksParams>>,
+        Parameters(p): Parameters<AnyScoped<cluster::ClusterTasksParams>>,
     ) -> Result<CallToolResult, McpError> {
-        self.scoped(p, "listing cluster tasks", cluster::cluster_tasks)
-            .await
+        let limit = cluster::task_limit(&p.inner);
+        self.any_scoped_merged(
+            p,
+            "listing cluster tasks",
+            "tasks",
+            cluster::cluster_tasks,
+            |tasks| cluster::newest_first(tasks, limit),
+        )
+        .await
     }
 
     #[tool(
@@ -416,14 +514,14 @@ impl ProxmoxMcpServer {
 
     // ---- nodes ----
     #[tool(
-        description = "List the cluster's nodes (the physical hosts/servers running Proxmox) with status, CPU, and memory.",
+        description = "List the cluster's nodes (the physical hosts/servers running Proxmox) with status, CPU, and memory. With cluster \"*\", lists every configured cluster's nodes as {nodes: [...each tagged with cluster], unreachable: {cluster: error}}.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_nodes_list(
         &self,
-        Parameters(p): Parameters<Scoped<NoParams>>,
+        Parameters(p): Parameters<AnyScoped<NoParams>>,
     ) -> Result<CallToolResult, McpError> {
-        self.get_simple(p, "/nodes", "listing nodes").await
+        self.get_any(p, "/nodes", "listing nodes", "nodes").await
     }
 
     #[tool(
@@ -586,17 +684,18 @@ impl ProxmoxMcpServer {
     }
 
     #[tool(
-        description = "List every guest (VM or container) that is NOT covered by any scheduled backup job. Use this to answer \"what isn't being backed up?\" in one call.",
+        description = "List every guest (VM or container) that is NOT covered by any scheduled backup job. Use this to answer \"what isn't being backed up?\" in one call. With cluster \"*\", checks every configured cluster and returns {guests: [...each tagged with cluster], unreachable: {cluster: error}}.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn proxmox_guests_without_backup_list(
         &self,
-        Parameters(p): Parameters<Scoped<NoParams>>,
+        Parameters(p): Parameters<AnyScoped<NoParams>>,
     ) -> Result<CallToolResult, McpError> {
-        self.get_simple(
+        self.get_any(
             p,
             "/cluster/backup-info/not-backed-up",
             "listing guests without backup",
+            "guests",
         )
         .await
     }
@@ -695,7 +794,7 @@ impl ProxmoxMcpServer {
     clippy::unused_async_trait_impl,
     reason = "`#[tool_handler]` generates an `async fn list_tools` with no `.await`"
 )]
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for ProxmoxMcpServer {
     fn get_info(&self) -> ServerConfig {
         let mut info = ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
@@ -719,11 +818,11 @@ impl ServerHandler for ProxmoxMcpServer {
                 " Several independent Proxmox clusters are configured: {} (default: {}). \
                  Every tool takes an optional `cluster` argument; omit it for the default. Node \
                  names and vmids are only unique within one cluster, so pass the same cluster to \
-                 follow-up calls. proxmox_guests_find and proxmox_cluster_resources_list accept \
-                 cluster \"*\" to search every cluster at once, tagging each result with its \
-                 cluster.",
+                 follow-up calls. {} accept cluster \"*\" to query every cluster at once, \
+                 tagging each result with its cluster.",
                 self.cluster_names(),
-                self.clusters.default
+                self.clusters.default,
+                self.fan_out_tools
             );
         }
         info.instructions = Some(instructions);
@@ -939,10 +1038,146 @@ mod tests {
                 .unwrap()
                 .contains("\"*\"")
         };
-        assert!(star("proxmox_guests_find"));
-        assert!(star("proxmox_cluster_resources_list"));
+        for tool in FAN_OUT_TOOLS {
+            assert!(star(tool), "{tool}");
+        }
         assert!(!star("proxmox_qemu_config_get"));
         assert!(!star("proxmox_version_get"));
+    }
+
+    /// Every tool that accepts `cluster: "*"`, sorted.
+    const FAN_OUT_TOOLS: [&str; 5] = [
+        "proxmox_cluster_resources_list",
+        "proxmox_cluster_tasks_list",
+        "proxmox_guests_find",
+        "proxmox_guests_without_backup_list",
+        "proxmox_nodes_list",
+    ];
+
+    /// The tool as the running server advertises it (schema adapted to the
+    /// configured clusters), unlike [`input_schema`]'s compile-time schema.
+    fn advertised_schema(server: &ProxmoxMcpServer, tool: &str) -> JsonObject {
+        (*ServerHandler::get_tool(server, tool).unwrap().input_schema).clone()
+    }
+
+    #[test]
+    fn single_cluster_hides_the_cluster_argument() {
+        let server = mock_server("https://pve.invalid");
+        for tool in server.tool_router.list_all() {
+            let schema = advertised_schema(&server, &tool.name);
+            assert!(
+                schema["properties"].get("cluster").is_none(),
+                "{}: {schema:?}",
+                tool.name
+            );
+        }
+        // …so argument-error hints don't suggest it either.
+        let summary =
+            expected_fields_summary(&advertised_schema(&server, "proxmox_qemu_config_get"))
+                .unwrap();
+        assert_eq!(summary, "node (required), vmid (required)");
+    }
+
+    #[test]
+    fn multi_cluster_enumerates_names_and_names_the_default() {
+        let server = two_unreachable_clusters();
+        let mut fan_out = Vec::new();
+        for tool in server.tool_router.list_all() {
+            let schema = advertised_schema(&server, &tool.name);
+            let Some(cluster) = schema["properties"].get("cluster") else {
+                assert_eq!(tool.name, "proxmox_clusters_list");
+                continue;
+            };
+            let choices = cluster["enum"].as_array().unwrap();
+            assert!(
+                cluster["description"].as_str().unwrap().contains("(a)"),
+                "{cluster}"
+            );
+            if choices.contains(&json!("*")) {
+                assert_eq!(choices, &[json!("a"), json!("b"), json!("*")]);
+                fan_out.push(tool.name.to_string());
+            } else {
+                assert_eq!(choices, &[json!("a"), json!("b")], "{}", tool.name);
+            }
+            let required = schema.get("required").and_then(Value::as_array);
+            assert!(
+                !required.is_some_and(|r| r.contains(&json!("cluster"))),
+                "{}: cluster must stay optional",
+                tool.name
+            );
+        }
+        fan_out.sort();
+        assert_eq!(fan_out, FAN_OUT_TOOLS);
+        assert_eq!(&*server.fan_out_tools, FAN_OUT_TOOLS.join(", "));
+    }
+
+    #[tokio::test]
+    async fn fan_out_tasks_are_newest_first_across_clusters_and_limited() {
+        let a = MockServer::start().await;
+        let b = MockServer::start().await;
+        let task = |upid: &str, starttime: i64| json!({ "upid": upid, "starttime": starttime });
+        mount_data(
+            &a,
+            "/cluster/tasks",
+            &[],
+            json!([task("a2", 1_700_000_300), task("a1", 1_700_000_100)]),
+        )
+        .await;
+        mount_data(
+            &b,
+            "/cluster/tasks",
+            &[],
+            json!([task("b2", 1_700_000_400), task("b1", 1_700_000_200)]),
+        )
+        .await;
+        let mcp = mock_multi(&[("a", &a.uri()), ("b", &b.uri())], "a");
+
+        let r = mcp
+            .proxmox_cluster_tasks_list(args(json!({ "cluster": "*", "limit": 3 })))
+            .await
+            .unwrap();
+        let out: Value = serde_json::from_str(text_of(&r)).unwrap();
+        let order: Vec<(&str, &str)> = out["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| (t["upid"].as_str().unwrap(), t["cluster"].as_str().unwrap()))
+            .collect();
+        assert_eq!(order, [("b2", "b"), ("a2", "a"), ("b1", "b")]);
+    }
+
+    #[tokio::test]
+    async fn fan_out_fixed_path_tools_tag_each_cluster() {
+        let a = MockServer::start().await;
+        let b = MockServer::start().await;
+        mount_data(&a, "/nodes", &[], json!([{ "node": "pve1" }])).await;
+        mount_data(&b, "/nodes", &[], json!([{ "node": "pve1" }])).await;
+        mount_data(
+            &a,
+            "/cluster/backup-info/not-backed-up",
+            &[],
+            json!([{ "vmid": 100 }]),
+        )
+        .await;
+        mount_data(&b, "/cluster/backup-info/not-backed-up", &[], json!([])).await;
+        let mcp = mock_multi(&[("a", &a.uri()), ("b", &b.uri())], "a");
+
+        let r = mcp
+            .proxmox_nodes_list(args(json!({ "cluster": "*" })))
+            .await
+            .unwrap();
+        let out: Value = serde_json::from_str(text_of(&r)).unwrap();
+        assert_eq!(
+            out["nodes"],
+            json!([{ "node": "pve1", "cluster": "a" }, { "node": "pve1", "cluster": "b" }])
+        );
+
+        let r = mcp
+            .proxmox_guests_without_backup_list(args(json!({ "cluster": "*" })))
+            .await
+            .unwrap();
+        let out: Value = serde_json::from_str(text_of(&r)).unwrap();
+        assert_eq!(out["guests"], json!([{ "vmid": 100, "cluster": "a" }]));
     }
 
     #[test]
@@ -1523,7 +1758,7 @@ mod tests {
             .unwrap();
         assert_eq!(r.is_error, Some(true));
         assert!(
-            text_of(&r).contains("proxmox_guests_find"),
+            text_of(&r).contains(&FAN_OUT_TOOLS.join(", ")),
             "{}",
             text_of(&r)
         );

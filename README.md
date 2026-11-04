@@ -64,13 +64,19 @@ To serve several independent clusters from one server instance, use a
 ```
 
 - Every tool takes an optional `cluster` argument; omitting it uses `default`.
-  `default` may be left out when only one cluster is listed.
+  `default` may be left out when only one cluster is listed. The tool schemas
+  list the configured names as an `enum` and name the default, so the
+  assistant sees the valid choices up front. With a single cluster the
+  argument is left out of the schemas entirely.
 - `proxmox_clusters_list` returns the configured names and URLs (never tokens).
-- `proxmox_guests_find` and `proxmox_cluster_resources_list` accept
-  `cluster: "*"` to query every cluster concurrently. The result is
-  `{ "guests" | "resources": [...], "unreachable": { "<name>": "<error>" } }`:
-  each item is tagged with its `cluster`, and a cluster that is down or rejects
-  its token is reported under `unreachable` instead of failing the call.
+- `proxmox_cluster_resources_list`, `proxmox_guests_find`,
+  `proxmox_cluster_tasks_list`, `proxmox_nodes_list`, and
+  `proxmox_guests_without_backup_list` accept `cluster: "*"` to query every
+  cluster concurrently. The result is
+  `{ "<items>": [...], "unreachable": { "<name>": "<error>" } }`: each item is
+  tagged with its `cluster`, and a cluster that is down or rejects its token is
+  reported under `unreachable` instead of failing the call. Tasks are merged
+  newest first, with `limit` applied to the merged list.
 - The `PROXMOX_*` env vars override the default cluster only.
 - Cluster names may use letters, digits, `-`, `_` and `.`. A malformed entry
   (missing token, `http://` URL) stops startup; connection and auth failures

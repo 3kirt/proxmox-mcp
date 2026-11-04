@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `cluster: "*"` now also works on `proxmox_cluster_tasks_list` (merged newest
+  first across clusters, `limit` applied to the merged list),
+  `proxmox_nodes_list`, and `proxmox_guests_without_backup_list`.
+
+### Changed
+- **The `cluster` argument lists the configured clusters.** With several
+  clusters, each tool's schema gives `cluster` an `enum` of the configured
+  names (plus `"*"` where supported) and names the default, so the assistant
+  no longer needs `proxmox_clusters_list` to discover valid values. With a
+  single cluster, `cluster` is omitted from the schemas altogether.
+- `tools/list` serves the router built at startup instead of rebuilding every
+  tool schema on each request.
+
 ## [0.13.0] — 2026-11-02
 
 Security dependency updates, stricter config and argument validation,

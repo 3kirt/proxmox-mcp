@@ -19,7 +19,7 @@ pub async fn cluster_resources(
     client.get("/cluster/resources", &params).await
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct ClusterTasksParams {
     #[schemars(description = "Cap the number of tasks returned (default 50, most recent first)")]
     pub limit: Option<u32>,
@@ -65,9 +65,21 @@ pub async fn cluster_tasks(
         });
     }
 
-    let limit = usize::try_from(p.limit.unwrap_or(50)).unwrap_or(usize::MAX);
-    tasks.truncate(limit);
+    tasks.truncate(task_limit(&p));
     Ok(Value::Array(tasks))
+}
+
+/// The effective `limit` of a cluster task listing (default 50).
+pub fn task_limit(p: &ClusterTasksParams) -> usize {
+    usize::try_from(p.limit.unwrap_or(50)).unwrap_or(usize::MAX)
+}
+
+/// Merge step for a `"*"` task listing: each cluster returned its own newest
+/// `limit` tasks, so re-sort the combined list by `starttime` (newest first)
+/// and keep the overall newest `limit`.
+pub fn newest_first(tasks: &mut Vec<Value>, limit: usize) {
+    tasks.sort_by_key(|t| std::cmp::Reverse(t.get("starttime").and_then(Value::as_i64)));
+    tasks.truncate(limit);
 }
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]

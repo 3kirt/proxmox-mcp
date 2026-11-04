@@ -9,7 +9,7 @@ use serde::Deserialize;
 /// e.g. `#[serde(transparent)]` or `#[serde(try_from = "String")]`, pick how
 /// it deserializes. Derefs to `str`.
 macro_rules! string_param {
-    ($(#[$attr:meta])* $name:ident, $description:literal) => {
+    ($(#[$attr:meta])* $name:ident, $description:expr) => {
         #[derive(Debug, Clone, Deserialize)]
         $(#[$attr])*
         pub struct $name(String);
@@ -41,16 +41,25 @@ string_param!(
     "Cluster node name (see proxmox_nodes_list)"
 );
 
+/// Generic description of [`ClusterId`]. With several clusters configured the
+/// server replaces it at startup with one naming the clusters and the default
+/// (see `adapt_cluster_param`); with one cluster the argument is dropped.
+pub const CLUSTER_ID_DESCRIPTION: &str = "Proxmox cluster to query, by configured name (see proxmox_clusters_list). Omit to use the default cluster.";
+
+/// Generic description of [`ClusterSelector`]. Also how the startup schema
+/// rewrite recognizes a tool that accepts `"*"`.
+pub const CLUSTER_SELECTOR_DESCRIPTION: &str = "Proxmox cluster to query, by configured name (see proxmox_clusters_list), or \"*\" to query every configured cluster and tag each result with its cluster. Omit to use the default cluster.";
+
 string_param!(
     #[serde(transparent)]
     ClusterId,
-    "Proxmox cluster to query, by configured name (see proxmox_clusters_list). Omit to use the default cluster."
+    CLUSTER_ID_DESCRIPTION
 );
 
 string_param!(
     #[serde(transparent)]
     ClusterSelector,
-    "Proxmox cluster to query, by configured name (see proxmox_clusters_list), or \"*\" to query every configured cluster and tag each result with its cluster. Omit to use the default cluster."
+    CLUSTER_SELECTOR_DESCRIPTION
 );
 
 string_param!(
