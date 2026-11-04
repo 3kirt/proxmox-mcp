@@ -9,12 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Breaking:** cluster configuration moved from `~/.proxmox_mcp.json` to a
+directory with one file per cluster. See "Migrating" below.
+
 ### Added
 - `cluster: "*"` now also works on `proxmox_cluster_tasks_list` (merged newest
   first across clusters, `limit` applied to the merged list),
   `proxmox_nodes_list`, and `proxmox_guests_without_backup_list`.
 
 ### Changed
+- **One config file per cluster.** Clusters are read from
+  `~/.config/proxmox-mcp/clusters/` (`$XDG_CONFIG_HOME/proxmox-mcp/clusters` if
+  set), one `<name>.json` per cluster holding `url`/`token`/`insecure`, much
+  like a set of kubeconfig files. The file name is the cluster name. With
+  several files, the one with `"default": true` serves calls that omit
+  `cluster`; `PROXMOX_CLUSTER=<name>` overrides that. `--config-dir <DIR>`
+  replaces `--config <FILE>`.
 - **The `cluster` argument lists the configured clusters.** With several
   clusters, each tool's schema gives `cluster` an `enum` of the configured
   names (plus `"*"` where supported) and names the default, so the assistant
@@ -22,6 +32,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single cluster, `cluster` is omitted from the schemas altogether.
 - `tools/list` serves the router built at startup instead of rebuilding every
   tool schema on each request.
+
+### Removed
+- `~/.proxmox_mcp.json` (both the single-cluster form and the `clusters` map)
+  and the `--config` flag. The server no longer reads that file.
+
+### Migrating
+- Single cluster: move `~/.proxmox_mcp.json` to
+  `~/.config/proxmox-mcp/clusters/<name>.json` unchanged; the old top-level
+  fields are exactly the new file format. Or skip the file and keep using
+  `PROXMOX_URL`/`PROXMOX_TOKEN`.
+- `clusters` map: write each entry to its own `<name>.json`, and add
+  `"default": true` to the one that `"default"` named.
 
 ## [0.13.0] — 2026-11-02
 

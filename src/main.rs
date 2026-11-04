@@ -23,6 +23,14 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
         Runs over stdio transport — add it to your MCP client config and it will be launched \
         automatically.\n\
         \n\
+        CONFIGURATION\n\
+        \n\
+        Each cluster is one JSON file ({\"url\", \"token\", \"insecure\"}) in the config \
+        directory, named after the cluster: prod.json defines cluster \"prod\". With several \
+        files, mark one with \"default\": true (or set PROXMOX_CLUSTER) to serve tool calls \
+        that omit `cluster`. PROXMOX_URL / PROXMOX_TOKEN / PROXMOX_INSECURE override the default \
+        cluster, and alone define a single cluster when there are no files.\n\
+        \n\
         DEBUGGING\n\
         \n\
         Pass --debug to log every Proxmox request (method + URL) and full error response \
@@ -33,9 +41,11 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
     version
 )]
 struct Args {
-    /// Path to the configuration file (default: ~/.proxmox_mcp.json)
-    #[arg(long)]
-    config: Option<PathBuf>,
+    /// Directory of per-cluster config files, one `<cluster>.json` each
+    /// (default: $XDG_CONFIG_HOME/proxmox-mcp/clusters, else
+    /// ~/.config/proxmox-mcp/clusters)
+    #[arg(long, value_name = "DIR")]
+    config_dir: Option<PathBuf>,
 
     /// Log every Proxmox request and full error bodies (sets proxmox_mcp=debug
     /// unless RUST_LOG is set). The token is never logged.
@@ -88,10 +98,15 @@ async fn main() -> anyhow::Result<()> {
         .with(fmt::layer().json().with_writer(writer))
         .init();
 
-    let cfg = config::Config::load(args.config.as_deref())?;
+    let cfg = config::Config::load(args.config_dir.as_deref())?;
     let clusters = cfg.resolve()?;
 
-    info!(mode = "stdio", default_cluster = %clusters.default, "starting proxmox-mcp");
+    info!(
+        mode = "stdio",
+        config_dir = %cfg.dir().display(),
+        default_cluster = %clusters.default,
+        "starting proxmox-mcp"
+    );
     for (name, conn) in &clusters.entries {
         info!(
             cluster = %name,

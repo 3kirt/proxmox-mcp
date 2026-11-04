@@ -31,7 +31,7 @@ endpoints are wrapped.
 ```
 src/
   main.rs          — CLI (clap), tracing, stdio serve loop
-  config.rs        — Config::load(~/.proxmox_mcp.json) + env override → Clusters{default, name → Connection}
+  config.rs        — Config::load(dir: one <cluster>.json per cluster, default ~/.config/proxmox-mcp/clusters) + env override → Clusters{default, name → Connection}
   client.rs        — reqwest wrapper; get(path,params) -> unwrapped `data` Value; ProxmoxError
   tools/
     mod.rs         — ProxmoxMcpServer (one client per cluster), scoped()/any_scoped() call helpers, #[tool] shims, ServerHandler

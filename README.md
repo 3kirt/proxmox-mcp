@@ -11,13 +11,22 @@ role so read-only is enforced server-side as well.
 
 ## Configuration
 
-Settings come from `~/.proxmox_mcp.json` (env vars override the file):
+Each Proxmox cluster gets its own JSON file in a config directory, much like a
+set of kubeconfig files. The file name is the cluster's name: `prod.json`
+defines the cluster `prod`.
+
+```
+~/.config/proxmox-mcp/clusters/      ($XDG_CONFIG_HOME/proxmox-mcp/clusters if set)
+├── lab.json
+└── prod.json
+```
 
 ```json
 {
   "url": "https://pve.example.com:8006/api2/json",
   "token": "USER@REALM!TOKENID=UUID",
-  "insecure": false
+  "insecure": false,
+  "default": true
 }
 ```
 
@@ -26,6 +35,22 @@ Settings come from `~/.proxmox_mcp.json` (env vars override the file):
 | `url` | `PROXMOX_URL` | Must be `https://`. The `/api2/json` path is appended automatically if you omit it, so `https://host:8006` also works. |
 | `token` | `PROXMOX_TOKEN` | API token, format `USER@REALM!TOKENID=UUID`. |
 | `insecure` | `PROXMOX_INSECURE` | `true` accepts self-signed TLS certs (homelab default). |
+| `default` | `PROXMOX_CLUSTER` | Marks the cluster used when a tool call omits `cluster`. Only needed when there are several files; exactly one may set it. `PROXMOX_CLUSTER=<name>` overrides it. |
+
+- Pass `--config-dir <DIR>` to read the files from somewhere else. A
+  `--config-dir` that doesn't exist is an error; the default directory may be
+  missing.
+- Only `*.json` files are read. Hidden files and other extensions (READMEs,
+  `*.bak`) are ignored. File names may use letters, digits, `-`, `_` and `.`.
+- The `PROXMOX_URL`/`PROXMOX_TOKEN`/`PROXMOX_INSECURE` env vars override the
+  **default** cluster only. With no cluster files at all, they define a single
+  cluster on their own (named `default`, or whatever `PROXMOX_CLUSTER` says), so
+  a one-cluster setup can live entirely in the MCP client config (see
+  [Build & run](#build--run)).
+- Unknown keys are rejected, so a typo like `"insecue"` fails at startup
+  instead of silently using a default. A malformed file (bad JSON, missing
+  token, `http://` URL) stops startup with an error naming the file.
+  Connection and auth failures only affect calls to that cluster.
 
 **The Proxmox API lives under `/api2/json`.** You can point `url` at the bare
 host (`https://host:8006`) — the server appends the path for you — but a config
@@ -41,33 +66,22 @@ user@example.com@pve!mcp=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 
 Don't truncate the first `@` segment.
 
-### Multiple clusters
+**Lock down the cluster files.** The server refuses to start if any of them is
+world-readable, to keep the tokens from leaking:
 
-To serve several independent clusters from one server instance, use a
-`clusters` map instead of the top-level fields (the two forms can't be mixed):
-
-```json
-{
-  "default": "site-a",
-  "clusters": {
-    "site-a": {
-      "url": "https://pve-a.example.com:8006",
-      "token": "user@realm!mcp=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-    },
-    "site-b": {
-      "url": "https://pve-b.example.com:8006",
-      "token": "user@realm!mcp=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-      "insecure": true
-    }
-  }
-}
+```sh
+chmod 700 ~/.config/proxmox-mcp/clusters
+chmod 600 ~/.config/proxmox-mcp/clusters/*.json
 ```
 
-- Every tool takes an optional `cluster` argument; omitting it uses `default`.
-  `default` may be left out when only one cluster is listed. The tool schemas
-  list the configured names as an `enum` and name the default, so the
-  assistant sees the valid choices up front. With a single cluster the
-  argument is left out of the schemas entirely.
+### Multiple clusters
+
+Every cluster file in the directory is served by one server instance:
+
+- Every tool takes an optional `cluster` argument; omitting it uses the default
+  cluster. The tool schemas list the configured names as an `enum` and name the
+  default, so the assistant sees the valid choices up front. With a single
+  cluster the argument is left out of the schemas entirely.
 - `proxmox_clusters_list` returns the configured names and URLs (never tokens).
 - `proxmox_cluster_resources_list`, `proxmox_guests_find`,
   `proxmox_cluster_tasks_list`, `proxmox_nodes_list`, and
@@ -77,19 +91,6 @@ To serve several independent clusters from one server instance, use a
   tagged with its `cluster`, and a cluster that is down or rejects its token is
   reported under `unreachable` instead of failing the call. Tasks are merged
   newest first, with `limit` applied to the merged list.
-- The `PROXMOX_*` env vars override the default cluster only.
-- Cluster names may use letters, digits, `-`, `_` and `.`. A malformed entry
-  (missing token, `http://` URL) stops startup; connection and auth failures
-  only affect calls to that cluster.
-- The legacy single-cluster form keeps working, and the cluster it describes
-  is named `default`.
-
-**Lock down the config file.** The server refuses to start if the file is
-world-readable, to keep the token from leaking:
-
-```sh
-chmod 600 ~/.proxmox_mcp.json
-```
 
 ### Creating a read-only token
 
