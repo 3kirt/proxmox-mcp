@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-11-09
+
+rmcp 3.9 for a RustSec advisory, and blank env vars no longer override the
+cluster files.
+
 ### Fixed
 - A set-but-empty `PROXMOX_URL`, `PROXMOX_TOKEN`, `PROXMOX_INSECURE` or
   `PROXMOX_CLUSTER` now counts as unset, instead of overriding the cluster file
