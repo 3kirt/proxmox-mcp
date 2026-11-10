@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- A set-but-empty `PROXMOX_URL`, `PROXMOX_TOKEN`, `PROXMOX_INSECURE` or
+  `PROXMOX_CLUSTER` now counts as unset, instead of overriding the cluster file
+  (and sending an empty token). MCP clients pass `""` when a `${VAR}` they
+  expand isn't exported.
+
+### Security
+- rmcp 3.9 (floor raised from 3.8) for RUSTSEC-2026-0462, unbounded response
+  buffering in rmcp's Streamable HTTP client. This server doesn't use that
+  client, but the advisory flagged the lockfile.
+
+### Internal
+- CI also runs weekly, so new RustSec advisories surface without a push.
+
 ## [0.14.0] — 2026-11-03
 
 Per-cluster config files, cluster-aware tool schemas, and `"*"` on more tools.

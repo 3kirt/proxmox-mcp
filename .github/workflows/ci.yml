@@ -7,6 +7,9 @@ on:
     branches: [main]
   # Lets release.yml run these exact checks as a gate before building.
   workflow_call:
+  # Weekly run so newly published RustSec advisories surface without a push.
+  schedule:
+    - cron: "0 6 * * 1"
 
 env:
   CARGO_TERM_COLOR: always

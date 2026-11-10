@@ -146,10 +146,7 @@ impl Config {
     /// files at all, they define a single cluster on their own.
     pub fn resolve(&self) -> anyhow::Result<Clusters> {
         let mut raw = self.clusters.clone();
-        let selected = std::env::var("PROXMOX_CLUSTER")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+        let selected = env_non_empty("PROXMOX_CLUSTER").map(|s| s.trim().to_string());
 
         let default = if raw.is_empty() {
             let name = selected.unwrap_or_else(|| ENV_CLUSTER_NAME.to_string());
@@ -250,15 +247,23 @@ fn load_cluster_file(path: &Path) -> anyhow::Result<ClusterFile> {
 }
 
 fn apply_env(cluster: &mut ClusterFile) {
-    if let Ok(url) = std::env::var("PROXMOX_URL") {
+    if let Some(url) = env_non_empty("PROXMOX_URL") {
         cluster.url = Some(url);
     }
-    if let Ok(token) = std::env::var("PROXMOX_TOKEN") {
+    if let Some(token) = env_non_empty("PROXMOX_TOKEN") {
         cluster.token = Some(token);
     }
-    if let Ok(v) = std::env::var("PROXMOX_INSECURE") {
+    if let Some(v) = env_non_empty("PROXMOX_INSECURE") {
         cluster.insecure = Some(parse_bool(&v));
     }
+}
+
+/// An env var's value, with set-but-blank treated as unset. MCP clients that
+/// expand `${PROXMOX_TOKEN}` in a shared config pass "" when the user hasn't
+/// exported it; that must fall back to the cluster file (or fail with "not
+/// set"), not override it and send an empty token.
+fn env_non_empty(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
 fn resolve_cluster(raw: ClusterFile, dir: &Path) -> anyhow::Result<Connection> {
@@ -551,6 +556,27 @@ mod tests {
         assert_eq!(c.entries["prod"].token, "env@pam!t=z");
         assert!(c.entries["prod"].insecure);
         assert_eq!(c.entries["lab"].token, "lab@pam!t=x");
+    }
+
+    #[test]
+    fn blank_env_vars_do_not_override_the_cluster_file() {
+        let _guard = lock_env();
+        clear_env();
+        let cfg = load(&[("lab.json", LAB)]).unwrap();
+        set_env(&[
+            ("PROXMOX_URL", ""),
+            ("PROXMOX_TOKEN", "  "),
+            ("PROXMOX_INSECURE", ""),
+            ("PROXMOX_CLUSTER", ""),
+        ]);
+        let c = cfg.resolve();
+        clear_env();
+        let c = c.unwrap();
+        assert_eq!(c.default, "lab");
+        let conn = default_conn(&c);
+        assert_eq!(conn.url, "https://lab.example.com:8006/api2/json");
+        assert_eq!(conn.token, "lab@pam!t=x");
+        assert!(!conn.insecure);
     }
 
     #[test]

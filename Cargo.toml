@@ -28,7 +28,7 @@ doc_markdown = "allow"
 wildcard_imports = "allow"
 
 [dependencies]
-rmcp = { version = "3.8", features = [
+rmcp = { version = "3.9", features = [
     "server",
     "macros",
     "transport-io",
