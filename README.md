@@ -129,6 +129,7 @@ line is the full `USER@REALM!TOKENID=SECRET` token.
 
    ```json
    {
+     "gpg": "/opt/homebrew/bin/gpg",
      "insecure": true,
      "pass_entry": "proxmox-mcp/pve.example.com",
      "password_store_dir": "/Users/you/.password-store",
@@ -146,10 +147,15 @@ line is the full `USER@REALM!TOKENID=SECRET` token.
      `--cluster` defaults to the default cluster.
    - Any plaintext `token` is removed from the file. Other keys, such as
      `default`, are kept.
-   - The store path is recorded, and so is `gnupg_home` when `GNUPGHOME` is
-     set, because MCP clients launched from a GUI don't see shell-only
-     exports. If the client starts servers with a minimal `PATH` (no
-     `/opt/homebrew/bin`), add `"gpg": "/opt/homebrew/bin/gpg"`.
+   - It records everything the server needs to find the token as absolute
+     paths, because MCP clients launched from a GUI don't see shell-only
+     exports and often start servers with a minimal `PATH` (no
+     `/opt/homebrew/bin`): the store path, `gnupg_home` when `GNUPGHOME` is
+     set, and the full path of the `gpg` it found on `PATH`. If the
+     verification used `--insecure` or `PROXMOX_INSECURE`, it also records
+     `"insecure": true`.
+   - A broken file for another cluster doesn't block `login --cluster lab`
+     (it's skipped with a warning).
 3. **Check it.** `proxmox-mcp status` shows each cluster's URL and token
    source. For a pass entry it also shows the recipients and whether gpg-agent
    has the key unlocked. It asks gpg-agent over its socket and doesn't
@@ -159,7 +165,9 @@ line is the full `USER@REALM!TOKENID=SECRET` token.
    the passphrase, tool calls for that cluster fail with *"Proxmox token is
    locked … run `proxmox-mcp unlock`"*. Run `proxmox-mcp unlock` in a terminal,
    then retry; there's no need to restart the server. `unlock` covers every
-   cluster with a `pass_entry`, or just one with `--cluster`. The server starts
+   cluster with a `pass_entry`, or just one with `--cluster`; a cluster it
+   can't unlock (e.g. a logged-out entry) is reported without stopping the
+   rest. The server starts
    even while the key is locked, and keeps a decrypted token in memory after
    its first successful read.
 

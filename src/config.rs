@@ -145,6 +145,13 @@ pub struct Clusters {
     pub entries: BTreeMap<String, Connection>,
 }
 
+/// A cluster file [`Config::load_or_empty`] couldn't load.
+#[derive(Debug)]
+pub struct SkippedFile {
+    pub path: PathBuf,
+    pub error: anyhow::Error,
+}
+
 /// The cluster files of a config directory, before env-var resolution.
 #[derive(Debug, Clone, Default)]
 pub struct Config {
@@ -168,11 +175,22 @@ impl Config {
 
     /// Like [`Self::load`], but a missing directory — even an explicit
     /// `--config-dir` — is empty: for `proxmox-mcp login`, which creates it.
-    pub fn load_or_empty(dir: Option<&Path>) -> anyhow::Result<Self> {
-        match dir {
-            Some(d) => Self::load_dir(d, false),
-            None => Self::load_dir(&default_config_dir()?, false),
-        }
+    ///
+    /// Also lenient about *other* files: a cluster file that fails to load
+    /// is skipped and returned with its error, so one broken file doesn't
+    /// block logging in to a different cluster. The caller decides whether a
+    /// skipped file matters.
+    pub fn load_or_empty(dir: Option<&Path>) -> anyhow::Result<(Self, Vec<SkippedFile>)> {
+        let dir = match dir {
+            Some(d) => d.to_path_buf(),
+            None => default_config_dir()?,
+        };
+        let mut skipped = Vec::new();
+        let config = Self::load_dir_with(&dir, false, &mut |path, err| {
+            skipped.push(SkippedFile { path, error: err });
+            Ok(())
+        })?;
+        Ok((config, skipped))
     }
 
     /// The directory the cluster files were (or would have been) read from.
@@ -226,6 +244,17 @@ impl Config {
     }
 
     fn load_dir(dir: &Path, required: bool) -> anyhow::Result<Self> {
+        Self::load_dir_with(dir, required, &mut |_, err| Err(err))
+    }
+
+    /// Load `dir`, passing each cluster file that fails to load to
+    /// `on_error`, which either propagates the error or swallows it (skipping
+    /// that file).
+    fn load_dir_with(
+        dir: &Path,
+        required: bool,
+        on_error: &mut dyn FnMut(PathBuf, anyhow::Error) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Self> {
         let mut config = Self {
             dir: dir.to_path_buf(),
             clusters: BTreeMap::new(),
@@ -248,12 +277,21 @@ impl Config {
             let path = entry
                 .with_context(|| format!("reading config directory {}", dir.display()))?
                 .path();
-            let Some(name) = cluster_name(&path)? else {
-                continue;
-            };
-            let cluster = load_cluster_file(&path)
-                .with_context(|| format!("cluster file {}", path.display()))?;
-            config.clusters.insert(name, cluster);
+            let loaded = cluster_name(&path).and_then(|name| match name {
+                Some(name) => Ok(Some((
+                    name,
+                    load_cluster_file(&path)
+                        .with_context(|| format!("cluster file {}", path.display()))?,
+                ))),
+                None => Ok(None),
+            });
+            match loaded {
+                Ok(Some((name, cluster))) => {
+                    config.clusters.insert(name, cluster);
+                }
+                Ok(None) => {}
+                Err(e) => on_error(path, e)?,
+            }
         }
         Ok(config)
     }
@@ -508,7 +546,7 @@ pub fn validate_cluster_name(name: &str) -> anyhow::Result<()> {
 /// point the config at a bare `https://host:8006`, which makes every call 500
 /// with a misleading `no such file '/version'`. Append the path when it is
 /// missing so the bare host form just works.
-fn normalize_url(url: &str) -> String {
+pub fn normalize_url(url: &str) -> String {
     let trimmed = url.trim_end_matches('/');
     if trimmed.ends_with("/api2/json") {
         trimmed.to_string()
@@ -557,16 +595,7 @@ pub fn update_cluster_file(
         std::fs::canonicalize(path).with_context(|| format!("resolving {}", path.display()))?
     } else {
         if let Some(dir) = path.parent() {
-            let mut builder = std::fs::DirBuilder::new();
-            builder.recursive(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
-            builder
-                .create(dir)
-                .with_context(|| format!("creating config directory {}", dir.display()))?;
+            crate::credentials::create_private_dir(dir)?;
         }
         path.to_path_buf()
     };

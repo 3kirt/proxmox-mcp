@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::{Client, StatusCode, header};
 use serde_json::Value;
@@ -91,13 +91,20 @@ struct TokenState {
     /// Proxmox rejected `value` (401): re-read the entry before the next
     /// request, in case the token was rotated with `proxmox-mcp login`.
     stale: bool,
+    /// A re-read after a 401 failed: don't run gpg again before this, so a
+    /// revoked token with a locked key doesn't put a decrypt in front of
+    /// every request.
+    retry_at: Option<Instant>,
 }
+
+/// How long to keep reusing a rejected token after re-reading it failed.
+const REREAD_BACKOFF: Duration = Duration::from_secs(30);
 
 impl PassToken {
     async fn header(&self) -> Result<header::HeaderValue, ProxmoxError> {
         let mut state = self.state.lock().await;
         if let Some(value) = state.value.as_ref()
-            && !state.stale
+            && (!state.stale || state.retry_at.is_some_and(|t| Instant::now() < t))
         {
             return Ok(value.clone());
         }
@@ -113,6 +120,7 @@ impl PassToken {
                 debug!(target: LOG_TARGET, entry = self.entry.name(), "decrypted Proxmox token from pass");
                 state.value = Some(value.clone());
                 state.stale = false;
+                state.retry_at = None;
                 Ok(value)
             }
             // The re-read after a 401 failed (typically: gpg-agent's cache has
@@ -121,7 +129,9 @@ impl PassToken {
             // misleading "locked"; the re-read is retried on the next request.
             (Err(e), Some(old)) => {
                 debug!(target: LOG_TARGET, error = %e, "re-reading rejected token failed; reusing it");
-                Ok(old.clone())
+                let old = old.clone();
+                state.retry_at = Some(Instant::now() + REREAD_BACKOFF);
+                Ok(old)
             }
             (Err(e), None) => Err(ProxmoxError::Credentials(e.to_string())),
         };
@@ -603,6 +613,33 @@ mod tests {
                 matches!(err, ProxmoxError::Api { status, .. } if status == StatusCode::UNAUTHORIZED),
                 "{err}"
             );
+        }
+
+        #[tokio::test]
+        async fn failed_reread_backs_off_instead_of_decrypting_per_request() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/version"))
+                .respond_with(ResponseTemplate::new(401))
+                .mount(&server)
+                .await;
+            let (dir, file, client) = pass_client(&server);
+            std::fs::write(&file, ok_snippet(OLD)).unwrap();
+            assert!(client.get("/version", &[]).await.is_err());
+
+            // Locked from now on; count every decrypt attempt.
+            let counter = dir.path().join("decrypts");
+            std::fs::write(
+                &file,
+                format!("echo x >> '{}'\n{LOCKED_SNIPPET}", counter.display()),
+            )
+            .unwrap();
+            for _ in 0..4 {
+                let err = client.get("/version", &[]).await.unwrap_err();
+                assert!(matches!(err, ProxmoxError::Api { .. }), "{err}");
+            }
+            let n = std::fs::read_to_string(&counter).unwrap().lines().count();
+            assert_eq!(n, 1, "gpg ran {n} times within the backoff");
         }
 
         #[tokio::test]
