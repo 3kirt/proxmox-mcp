@@ -1,0 +1,7 @@
+# Pinned so local, CI and release builds use the same compiler and lints.
+# The weekly scheduled workflow builds on current stable and beta as an early
+# warning, and the release command offers to bump this pin.
+[toolchain]
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

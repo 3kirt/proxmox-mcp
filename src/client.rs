@@ -154,6 +154,14 @@ fn auth_header(token: &str) -> anyhow::Result<header::HeaderValue> {
     Ok(value)
 }
 
+/// Install ring as rustls's process-wide crypto provider. reqwest is built
+/// with `rustls-no-provider` (see Cargo.toml), so a client can't be built
+/// until this has run. Idempotent: later calls are no-ops.
+pub fn install_crypto_provider() {
+    // Err only means a provider is already installed.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 impl ProxmoxClient {
     /// A client for `conn`. A pass-entry token is decrypted on the first
     /// request (see [`PassToken`]), so the server starts even while the GPG
@@ -164,6 +172,7 @@ impl ProxmoxClient {
             credential,
             insecure,
         } = conn;
+        install_crypto_provider();
         let mut headers = header::HeaderMap::new();
         let auth = match credential {
             Credential::Env(token) | Credential::File(token) => {

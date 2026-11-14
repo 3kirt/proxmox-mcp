@@ -5,8 +5,6 @@ All notable changes to proxmox-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
----
-
 ## [Unreleased]
 
 ### Added
@@ -25,17 +23,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gpg-agent lock state per cluster, without decrypting). With no subcommand
   the server runs over stdio as before.
 
+### Changed
+- TLS uses rustls with the ring crypto provider instead of aws-lc-rs, which
+  carries OpenSSL-style license terms. cargo-deny now bans aws-lc.
+- Release binaries add darwin amd64 (Intel Mac). The Linux binaries are built
+  on Ubuntu 22.04, so they run on glibc 2.35 and later; arm64 is now built
+  natively. Each release carries a build-provenance attestation and notes
+  taken from this changelog.
+
 ### Fixed
 - An unexpanded `${VAR}` placeholder, which Claude Code passes through
   literally when the variable is unset, now counts as unset in every env var
   and cluster-file value (with a warning), like a blank value does.
 
 ### Internal
+- CI/CD shared with gitlab-mcp and netbox-mcp:
+  - The Makefile is the single source of truth, and the workflows only call
+    its targets. `make check` (fmt-check, lint, test, deny, release build,
+    smoke) is the pre-release gate.
+  - The toolchain is pinned to 1.100.0 in `rust-toolchain.toml`. The declared
+    MSRV, 1.88, is now verified in CI.
+  - CI tests on Linux and macOS, and runs a real-gpg classification test.
+  - cargo-deny (advisories, bans, sources, licenses) replaces cargo-audit.
+  - Releases check that the tag matches `Cargo.toml`, is on main, and has a
+    CHANGELOG section. Each binary is smoke-tested over MCP before upload
+    (`scripts/smoke.py`).
+  - A weekly workflow runs cargo-deny, MSRV, stable/beta toolchain drift and
+    real gpg on both OSes, and opens an issue when it fails.
+  - Actions are pinned by SHA, and Dependabot is set up for actions and cargo.
+  - A secrets scan rejects committed Proxmox token secrets.
 - `tests/launch_path.rs` runs the built binary over MCP stdio against a local
   HTTPS stand-in for Proxmox. It checks that the pass token is sent when
   `PROXMOX_TOKEN` is unset, empty, or a literal `${PROXMOX_TOKEN}`.
 
-## [0.15.0] — 2026-11-09
+## [0.15.0] - 2026-11-09
 
 rmcp 3.9 for a RustSec advisory, and blank env vars no longer override the
 cluster files.
@@ -54,7 +75,7 @@ cluster files.
 ### Internal
 - CI also runs weekly, so new RustSec advisories surface without a push.
 
-## [0.14.0] — 2026-11-03
+## [0.14.0] - 2026-11-03
 
 Per-cluster config files, cluster-aware tool schemas, and `"*"` on more tools.
 
@@ -94,7 +115,7 @@ directory with one file per cluster. See "Migrating" below.
 - `clusters` map: write each entry to its own `<name>.json`, and add
   `"default": true` to the one that `"default"` named.
 
-## [0.13.0] — 2026-11-02
+## [0.13.0] - 2026-11-02
 
 Security dependency updates, stricter config and argument validation,
 cancellation support, and compact tool output.
@@ -135,7 +156,7 @@ cancellation support, and compact tool output.
 - New `cargo audit` CI job, which also gates releases.
 - Declares `rust-version = 1.88`; license identifier is now `GPL-3.0-only`.
 
-## [0.12.0] — 2026-10-05
+## [0.12.0] - 2026-10-05
 
 Build and release pipeline fixes only; tools and behavior are unchanged.
 
@@ -148,7 +169,7 @@ Build and release pipeline fixes only; tools and behavior are unchanged.
   publishes a release. `/release` updates the local stable toolchain first and
   lints with `--all-targets`, matching CI.
 
-## [0.11.0] — 2026-10-05
+## [0.11.0] - 2026-10-05
 
 Multi-cluster support, task/backup/HA/disk-health tools, and rmcp 3.5. Removes
 the LXC tools.
@@ -219,7 +240,7 @@ the LXC tools.
 - Tests share `mount_data` / `mount_failure` mock helpers and build arguments
   from JSON.
 
-## [0.10.0] — 2026-08-06
+## [0.10.0] - 2026-08-06
 
 Upgrade to rmcp 3.x.
 
@@ -234,7 +255,7 @@ Upgrade to rmcp 3.x.
   `serde_json`, `thiserror`, and `tokio` bumped to their latest in-range patch
   versions.
 
-## [0.9.0] — 2026-07-04
+## [0.9.0] - 2026-07-04
 
 Upgrade to rmcp 2.x and tighten the lint gate.
 
@@ -257,7 +278,7 @@ Upgrade to rmcp 2.x and tighten the lint gate.
   `struct_field_names`). Added package `keywords`/`categories` metadata and
   strengthened `make lint` to run `--all-targets`.
 
-## [0.8.0] — 2026-06-25
+## [0.8.0] - 2026-06-25
 
 ### Removed
 - **MCP logging capability** — the server no longer advertises `logging`, sends
@@ -274,7 +295,7 @@ Upgrade to rmcp 2.x and tighten the lint gate.
   client over the MCP logging channel. The error is still returned in-band as
   the tool result, so MCP clients see no change.
 
-## [0.7.0] — 2026-06-25
+## [0.7.0] - 2026-06-25
 
 ### Added
 - `proxmox_nodes_network_list` and `proxmox_nodes_network_get` — enumerate a
@@ -289,7 +310,7 @@ Upgrade to rmcp 2.x and tighten the lint gate.
   `anyhow` to 1.0.103. `rmcp` is held at 1.7 for now: 1.8 deprecates the MCP
   logging capability (SEP-2577) this server uses, to be migrated separately.
 
-## [0.6.0] — 2026-06-21
+## [0.6.0] - 2026-06-21
 
 ### Added
 - `--debug` and `--log-file` flags for request tracing: `--debug` logs every
@@ -313,7 +334,7 @@ Upgrade to rmcp 2.x and tighten the lint gate.
 - `node` parameters use a `NodeId` newtype so the field description lives in one
   place (was duplicated across six param structs).
 
-## [0.5.0] — 2026-06-10
+## [0.5.0] - 2026-06-10
 
 ### Added
 - Tool failures are now emitted as MCP `notifications/message` logs (the server
@@ -336,7 +357,7 @@ Upgrade to rmcp 2.x and tighten the lint gate.
   `proxmox_nodes_list`, `proxmox_qemu_list`, and `proxmox_lxc_list` are
   unchanged. MCP clients referencing the old names must update.
 
-## [0.4.0] — 2026-06-07
+## [0.4.0] - 2026-06-07
 
 ### Changed
 - Internal refactor only, no behavior change: the per-tool
@@ -344,7 +365,7 @@ Upgrade to rmcp 2.x and tighten the lint gate.
   helper, a `QueryBuilder::flag` helper centralizes Proxmox `1`/`0` booleans,
   and `humanize_value`'s epoch-to-ISO insertion was simplified.
 
-## [0.3.0] — 2026-06-02
+## [0.3.0] - 2026-06-02
 
 ### Added
 - `proxmox_guest_find` — resolve a guest name (VM or container) to its node +
@@ -376,7 +397,7 @@ Upgrade to rmcp 2.x and tighten the lint gate.
   permission check, email-style (`@`-in-username) token format, and a
   troubleshooting section.
 
-## [0.2.0] — 2026-06-02
+## [0.2.0] - 2026-06-02
 
 First release: a read-only MCP server exposing Proxmox VE data.
 

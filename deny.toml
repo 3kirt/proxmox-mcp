@@ -1,0 +1,40 @@
+# cargo-deny: advisories, bans, sources and licenses. Run with `make deny`.
+
+[graph]
+all-features = true
+
+[advisories]
+# Vulnerabilities fail; unmaintained/unsound notices are reported.
+unmaintained = "workspace"
+yanked = "deny"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = [
+    # aws-lc carries OpenSSL-style license terms; rustls runs on ring instead
+    # (see Cargo.toml).
+    { crate = "aws-lc-sys", reason = "use rustls's ring provider" },
+    { crate = "aws-lc-rs", reason = "use rustls's ring provider" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[licenses]
+# Only GPL-3.0-compatible licenses that the tree actually needs. Crates
+# offering a choice (e.g. "MIT OR Unlicense") are satisfied by one of these.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    # This crate itself.
+    "GPL-3.0-only",
+]
+confidence-threshold = 0.9
