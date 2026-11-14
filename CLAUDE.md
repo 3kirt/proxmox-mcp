@@ -30,8 +30,10 @@ endpoints are wrapped.
 
 ```
 src/
-  main.rs          — CLI (clap), tracing, stdio serve loop
-  config.rs        — Config::load(dir: one <cluster>.json per cluster, default ~/.config/proxmox-mcp/clusters) + env override → Clusters{default, name → Connection}
+  main.rs          — CLI (clap; login/logout/unlock/status subcommands), tracing, stdio serve loop
+  config.rs        — Config::load(dir: one <cluster>.json per cluster, default ~/.config/proxmox-mcp/clusters) + env override → Clusters{default, name → Connection{url, Credential::{Env,File,Pass}, insecure}}; env_var()/non_blank() treat blank and unexpanded ${VAR} as unset
+  credentials/     — pass-compatible GPG store: PassStore/PassEntry (gpg --pinentry-mode error, status-fd classification → PassError::Locked/NoSecretKey); agent.rs = Assuan KEYINFO client, used only by `status`
+  commands.rs      — login / logout / unlock / status subcommands (stderr output; no subcommand = serve stdio)
   client.rs        — reqwest wrapper; get(path,params) -> unwrapped `data` Value; ProxmoxError
   tools/
     mod.rs         — ProxmoxMcpServer (one client per cluster), scoped()/any_scoped() call helpers, #[tool] shims, ServerHandler
@@ -61,11 +63,36 @@ The full Proxmox API schema is at `~/source/repos/pve-docs/api-viewer/apidata.js
 (PNG), `*/vncwebsocket`/`mtunnelwebsocket` (websockets), and `qemu/*/agent/*`
 (executes guest-agent commands) from the read-only set.
 
+## Pass-backed tokens
+
+- **Lazy auth:** a `Credential::Pass` client decrypts on the first request under a
+  mutex, caches only success, and marks the token stale on a 401 (re-reading the
+  entry next time, but reusing the old token if that re-read fails so the caller
+  sees the real 401). Never add a startup-time decrypt or token check: the server
+  must start while the key is locked. Decrypt failures are
+  `ProxmoxError::Credentials`; fan-out reports them under `unreachable`.
+- **Never prompt** in the server path and never match gpg's localized text:
+  classify by the numeric `[GNUPG:] ERROR` codes (low 16 bits: 85/99 locked, 17 no
+  secret key), and require `DECRYPTION_OKAY` for success.
+- `unlock`/`status` use the cluster file's `pass_entry` directly
+  (`Config::configured_pass_entry`), not the resolved credential, so an exported
+  `PROXMOX_TOKEN` can't hide the entry the server uses.
+
 ## Testing
 
 Unit tests live beside the code: `config.rs` (loading, clusters, env override,
-HTTPS), `client.rs` (envelope handling, error truncation), `tools/slim.rs`,
+HTTPS, pass_entry, `${VAR}` placeholders, a lint of the README's MCP configs),
+`credentials/` (one shared fake `gpg` script in `test_support` that *sources* the
+entry file, so each test's "ciphertext" is a shell snippet emitting canned
+`[GNUPG:]` status lines), `commands.rs` (entry naming, token parsing), `client.rs` (envelope handling, error truncation), `tools/slim.rs`,
 `tools/params.rs` (`encode_seg`, `QueryBuilder`, UPID parsing), and
 `tools/mod.rs` (tool schemas, domain fns and tool calls against a `wiremock`
 Proxmox). In `mod.rs` tests, use `mount_data`/`mount_failure` for mocks and
 build params from JSON with `params(json!(..))` / `args(json!(..))`.
+
+`tests/launch_path.rs` spawns the built binary over MCP stdio with a pass-entry
+cluster file, a fake `gpg`, and a small self-signed HTTPS stand-in for Proxmox
+(the server refuses plain HTTP, so wiremock can't be used there). It asserts the
+pass token is sent when `PROXMOX_TOKEN` is unset, empty, or a literal
+`${PROXMOX_TOKEN}`. Tests that touch `PROXMOX_*` env vars hold
+`config::tests::lock_env()`.

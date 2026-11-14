@@ -1,5 +1,7 @@
 mod client;
+mod commands;
 mod config;
+mod credentials;
 mod tools;
 
 use std::fs::OpenOptions;
@@ -7,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use anyhow::Context;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use rmcp::ServiceExt;
 use tracing::info;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
@@ -31,6 +33,17 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
         that omit `cluster`. PROXMOX_URL / PROXMOX_TOKEN / PROXMOX_INSECURE override the default \
         cluster, and alone define a single cluster when there are no files.\n\
         \n\
+        GPG-ENCRYPTED TOKENS (pass)\n\
+        \n\
+        Instead of a plaintext \"token\", a cluster file can name an entry in a pass-compatible \
+        password store (~/.password-store, or $PASSWORD_STORE_DIR) with \"pass_entry\". \
+        `proxmox-mcp login --cluster NAME --url https://HOST:8006` verifies a token, encrypts \
+        it with gpg, and writes NAME.json. The server decrypts it on first use without ever \
+        prompting: if gpg-agent has not cached the passphrase, tool calls fail with a message \
+        asking you to run `proxmox-mcp unlock`, and succeed once you have. `proxmox-mcp status` \
+        shows each cluster's token source and lock state. Set \"gpg\" in the cluster file to \
+        the full path of gpg if your MCP client launches servers with a minimal PATH.\n\
+        \n\
         DEBUGGING\n\
         \n\
         Pass --debug to log every Proxmox request (method + URL) and full error response \
@@ -41,10 +54,13 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
     version
 )]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Directory of per-cluster config files, one `<cluster>.json` each
     /// (default: $XDG_CONFIG_HOME/proxmox-mcp/clusters, else
     /// ~/.config/proxmox-mcp/clusters)
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, value_name = "DIR", global = true)]
     config_dir: Option<PathBuf>,
 
     /// Log every Proxmox request and full error bodies (sets proxmox_mcp=debug
@@ -56,6 +72,19 @@ struct Args {
     /// Use this to capture a debug trace when the server is spawned by an MCP client.
     #[arg(long, value_name = "PATH")]
     log_file: Option<PathBuf>,
+}
+
+/// Without a subcommand, the MCP server runs over stdio.
+#[derive(Subcommand)]
+enum Command {
+    /// Verify an API token and store it GPG-encrypted in a pass store
+    Login(commands::LoginArgs),
+    /// Delete a cluster's stored token from the pass store
+    Logout(commands::LogoutArgs),
+    /// Cache the tokens' GPG passphrases in gpg-agent (prompts if needed)
+    Unlock(commands::ClusterArgs),
+    /// Show where each cluster's token comes from and whether its GPG key is unlocked
+    Status(commands::ClusterArgs),
 }
 
 /// Decide the tracing filter directive. An explicit, non-empty `RUST_LOG`
@@ -98,7 +127,18 @@ async fn main() -> anyhow::Result<()> {
         .with(fmt::layer().json().with_writer(writer))
         .init();
 
-    let cfg = config::Config::load(args.config_dir.as_deref())?;
+    let config_dir = args.config_dir.as_deref();
+    match args.command {
+        Some(Command::Login(a)) => return commands::login(config_dir, a).await,
+        Some(Command::Logout(a)) => return commands::logout(config_dir, a),
+        Some(Command::Unlock(a)) => return commands::unlock(config_dir, a).await,
+        Some(Command::Status(a)) => return commands::status(config_dir, a).await,
+        None => {}
+    }
+
+    let cfg = config::Config::load(config_dir)?;
+    // A pass-entry token is decrypted on first use, so a locked GPG key
+    // doesn't stop startup.
     let clusters = cfg.resolve()?;
 
     info!(
@@ -112,6 +152,7 @@ async fn main() -> anyhow::Result<()> {
             cluster = %name,
             proxmox_url = %conn.url,
             insecure = conn.insecure,
+            token_source = %conn.credential.describe(),
             "configured cluster"
         );
     }
