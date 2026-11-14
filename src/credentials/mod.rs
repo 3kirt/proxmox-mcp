@@ -687,7 +687,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = PassStore::new(dir.path(), fake_gpg()).with_timeout(Duration::from_millis(200));
         let entry = store.entry("t").unwrap();
-        std::fs::write(entry.path(), "sleep 10\n").unwrap();
+        // `exec`, so killing gpg kills the sleep too. A plain `sleep` child
+        // outlives the killed shell and, since spawn isn't atomic with CLOEXEC
+        // on macOS, can hold another test's pipe open for the full 10s.
+        std::fs::write(entry.path(), "exec sleep 10\n").unwrap();
         let err = entry.read_token().await.unwrap_err();
         assert!(matches!(err, PassError::Timeout { .. }), "{err}");
     }
