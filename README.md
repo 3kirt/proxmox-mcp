@@ -34,6 +34,10 @@ defines the cluster `prod`.
 |-------|---------|-------|
 | `url` | `PROXMOX_URL` | Must be `https://`. The `/api2/json` path is appended automatically if you omit it, so `https://host:8006` also works. |
 | `token` | `PROXMOX_TOKEN` | API token, format `USER@REALM!TOKENID=UUID`. |
+| `pass_entry` | — | Instead of `token`: a GPG-encrypted entry in a `pass`-compatible store (see [GPG-encrypted tokens](#gpg-encrypted-tokens-pass)). Setting both is an error. |
+| `password_store_dir` | — | Store root for `pass_entry`. Falls back to `$PASSWORD_STORE_DIR`, then `~/.password-store`. |
+| `gnupg_home` | — | GnuPG home for decrypting `pass_entry`. Falls back to `$GNUPGHOME`, then gpg's default (`~/.gnupg`). |
+| `gpg` | — | Path to the `gpg` binary (default: `gpg` from `PATH`). |
 | `insecure` | `PROXMOX_INSECURE` | `true` accepts self-signed TLS certs (homelab default). |
 | `default` | `PROXMOX_CLUSTER` | Marks the cluster used when a tool call omits `cluster`. Only needed when there are several files; exactly one may set it. `PROXMOX_CLUSTER=<name>` overrides it. |
 
@@ -47,6 +51,9 @@ defines the cluster `prod`.
   cluster on their own (named `default`, or whatever `PROXMOX_CLUSTER` says), so
   a one-cluster setup can live entirely in the MCP client config (see
   [Build & run](#build--run)).
+- A blank env var, or an unexpanded `${VAR}` placeholder an MCP client passed
+  through literally, counts as unset. `PROXMOX_TOKEN` beats the default
+  cluster's `token` *and* `pass_entry`.
 - Unknown keys are rejected, so a typo like `"insecue"` fails at startup
   instead of silently using a default. A malformed file (bad JSON, missing
   token, `http://` URL) stops startup with an error naming the file.
@@ -98,6 +105,68 @@ Every cluster file in the directory is served by one server instance:
 pveum user token add monitoring@pve mcp --privsep 0
 pveum acl modify / -token 'monitoring@pve!mcp' -role PVEAuditor
 ```
+
+### GPG-encrypted tokens (pass)
+
+A cluster file can name an entry in a [`pass`](https://www.passwordstore.org/)-compatible
+password store instead of holding the token in plaintext. The entry is
+`<store>/<pass_entry>.gpg`, encrypted to the keys in the nearest `.gpg-id`, so
+`pass show` reads it too. Only `gpg` is required, not `pass`. The entry's first
+line is the full `USER@REALM!TOKENID=SECRET` token.
+
+1. **Have a GPG key.** Check with `gpg --list-secret-keys`; if it's empty,
+   create one with `gpg --quick-gen-key "Your Name <you@example.com>"`.
+2. **Store the token.** Create a read-only token (above), then:
+
+   ```sh
+   proxmox-mcp login --cluster lab --url https://pve.example.com:8006 \
+       --gpg-id you@example.com --insecure
+   ```
+
+   It prompts for the token without echoing it (or reads it from stdin with
+   `--token-stdin`), checks it against `/version`, encrypts it to the store,
+   and writes `lab.json`:
+
+   ```json
+   {
+     "insecure": true,
+     "pass_entry": "proxmox-mcp/pve.example.com",
+     "password_store_dir": "/Users/you/.password-store",
+     "url": "https://pve.example.com:8006"
+   }
+   ```
+
+   - `--gpg-id` is for a new store with no `.gpg-id` yet. Drop it if you
+     already use `pass`: the store's `.gpg-id` is reused, and giving both is
+     an error. The `.gpg-id` is written only after encryption to that key
+     works, so a mistyped key ID leaves nothing behind.
+   - The entry defaults to `proxmox-mcp/<host>`, with `_<port>` appended for a
+     port other than 8006. Pass `--entry` to choose another.
+   - `--url` defaults to the cluster file's `url`, then `PROXMOX_URL`.
+     `--cluster` defaults to the default cluster.
+   - Any plaintext `token` is removed from the file. Other keys, such as
+     `default`, are kept.
+   - The store path is recorded, and so is `gnupg_home` when `GNUPGHOME` is
+     set, because MCP clients launched from a GUI don't see shell-only
+     exports. If the client starts servers with a minimal `PATH` (no
+     `/opt/homebrew/bin`), add `"gpg": "/opt/homebrew/bin/gpg"`.
+3. **Check it.** `proxmox-mcp status` shows each cluster's URL and token
+   source. For a pass entry it also shows the recipients and whether gpg-agent
+   has the key unlocked. It asks gpg-agent over its socket and doesn't
+   decrypt anything. A passphrase-less key or a smartcard can report
+   "not cached" and still decrypt fine.
+4. **Unlock when needed.** The server never prompts. If gpg-agent hasn't cached
+   the passphrase, tool calls for that cluster fail with *"Proxmox token is
+   locked … run `proxmox-mcp unlock`"*. Run `proxmox-mcp unlock` in a terminal,
+   then retry; there's no need to restart the server. `unlock` covers every
+   cluster with a `pass_entry`, or just one with `--cluster`. The server starts
+   even while the key is locked, and keeps a decrypted token in memory after
+   its first successful read.
+
+A 401 makes the server re-read the entry on the next call, so rotating a token
+with `proxmox-mcp login` takes effect without a restart. `proxmox-mcp logout
+--cluster lab` deletes the stored token, leaving `pass_entry` in place for the
+next `login`.
 
 ## Tools
 
@@ -154,6 +223,10 @@ UNIX-epoch fields (`ctime`, `starttime`, `endtime`) are returned with an
   ```
 - **Every call fails with `no such file '/version'`.** The `url` is missing the
   `/api2/json` path — recent versions append it automatically; upgrade or add it.
+- **Every call to a cluster says its token is locked.** Its `pass_entry` key
+  has no cached passphrase in gpg-agent. Run `proxmox-mcp unlock` and retry.
+  If the error says the gpg program wasn't found, the MCP client launched the
+  server with a minimal `PATH`: set `"gpg"` in the cluster file to its full path.
 - **Diagnosing a failing call.** Run with `--debug` to log every Proxmox request
   (method + URL) and the full, untruncated error body. Since an MCP client owns
   the server's stdio, pass `--log-file <path>` to capture the trace to a file

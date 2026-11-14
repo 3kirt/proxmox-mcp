@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- GPG-encrypted tokens: a cluster file can set `pass_entry` (instead of
+  `token`) to read its API token from a `pass`-compatible store, decrypted with
+  `gpg` on first use. Optional `password_store_dir`, `gnupg_home` and `gpg` keys
+  locate the store, keyring and binary. Setting both `token` and `pass_entry`
+  is an error, and `PROXMOX_TOKEN` still wins over both for the default cluster.
+- The server never prompts for a passphrase. A locked key fails that cluster's
+  calls with a message asking the user to run `proxmox-mcp unlock`, and the
+  next call after unlocking succeeds without a restart. The server starts
+  even while the key is locked. A 401 makes it re-read the entry, so a
+  rotated token is picked up live.
+- Subcommands: `login` (verify a token against `/version`, encrypt it, and
+  write the cluster file), `logout`, `unlock`, and `status` (token source and
+  gpg-agent lock state per cluster, without decrypting). With no subcommand
+  the server runs over stdio as before.
+
+### Fixed
+- An unexpanded `${VAR}` placeholder, which Claude Code passes through
+  literally when the variable is unset, now counts as unset in every env var
+  and cluster-file value (with a warning), like a blank value does.
+
+### Internal
+- `tests/launch_path.rs` runs the built binary over MCP stdio against a local
+  HTTPS stand-in for Proxmox. It checks that the pass token is sent when
+  `PROXMOX_TOKEN` is unset, empty, or a literal `${PROXMOX_TOKEN}`.
+
 ## [0.15.0] — 2026-11-09
 
 rmcp 3.9 for a RustSec advisory, and blank env vars no longer override the

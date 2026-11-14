@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::{Client, StatusCode, header};
@@ -5,7 +6,8 @@ use serde_json::Value;
 use thiserror::Error;
 use tracing::{debug, trace};
 
-use crate::config::Connection;
+use crate::config::{Connection, Credential};
+use crate::credentials::PassEntry;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -25,6 +27,10 @@ pub enum ProxmoxError {
     Partial(String),
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
+    /// The token couldn't be obtained (e.g. its GPG key is locked). The
+    /// message is written for the MCP client to relay to the user.
+    #[error("{0}")]
+    Credentials(String),
 }
 
 impl ProxmoxError {
@@ -55,28 +61,120 @@ impl ProxmoxError {
 pub struct ProxmoxClient {
     http: Client,
     base_url: String,
+    auth: Auth,
+}
+
+/// How the `Authorization` header is supplied.
+#[derive(Clone)]
+enum Auth {
+    /// Known up front; baked into the client's default headers.
+    Static,
+    /// Decrypted from a pass entry on first use and added per request.
+    Pass(Arc<PassToken>),
+}
+
+/// A token decrypted from a `pass` entry on demand. Failures are *not*
+/// cached: while the GPG key is locked every request fails fast with a
+/// [`ProxmoxError::Credentials`] explaining how to unlock, and the first
+/// request after the user unlocks succeeds — no server restart. Once
+/// decrypted the token is held in memory, so gpg-agent's cache TTL no longer
+/// matters for this process.
+struct PassToken {
+    entry: PassEntry,
+    // Held across the decrypt so concurrent requests run gpg once, not N times.
+    state: tokio::sync::Mutex<TokenState>,
+}
+
+#[derive(Default)]
+struct TokenState {
+    value: Option<header::HeaderValue>,
+    /// Proxmox rejected `value` (401): re-read the entry before the next
+    /// request, in case the token was rotated with `proxmox-mcp login`.
+    stale: bool,
+}
+
+impl PassToken {
+    async fn header(&self) -> Result<header::HeaderValue, ProxmoxError> {
+        let mut state = self.state.lock().await;
+        if let Some(value) = state.value.as_ref()
+            && !state.stale
+        {
+            return Ok(value.clone());
+        }
+        let read = self.entry.read_token().await;
+        let result = match (read, state.value.as_ref()) {
+            (Ok(token), _) => {
+                let value = auth_header(&token).map_err(|e| {
+                    ProxmoxError::Credentials(format!(
+                        "{e} (from pass entry {})",
+                        self.entry.name()
+                    ))
+                })?;
+                debug!(target: LOG_TARGET, entry = self.entry.name(), "decrypted Proxmox token from pass");
+                state.value = Some(value.clone());
+                state.stale = false;
+                Ok(value)
+            }
+            // The re-read after a 401 failed (typically: gpg-agent's cache has
+            // expired since the first decrypt). Keep sending the rejected
+            // token so the caller sees Proxmox's real auth error rather than a
+            // misleading "locked"; the re-read is retried on the next request.
+            (Err(e), Some(old)) => {
+                debug!(target: LOG_TARGET, error = %e, "re-reading rejected token failed; reusing it");
+                Ok(old.clone())
+            }
+            (Err(e), None) => Err(ProxmoxError::Credentials(e.to_string())),
+        };
+        drop(state);
+        result
+    }
+
+    /// Proxmox answered 401 to a request sent with `used`. Mark the token for
+    /// re-reading — but only if it's still the current one, so a 401 for an
+    /// already-replaced token can't discard its fresh successor.
+    async fn mark_rejected(&self, used: &header::HeaderValue) {
+        let mut state = self.state.lock().await;
+        if state.value.as_ref() == Some(used) {
+            state.stale = true;
+        }
+    }
+}
+
+/// Build the sensitive `Authorization` header value for a full API token.
+fn auth_header(token: &str) -> anyhow::Result<header::HeaderValue> {
+    // Proxmox uses "PVEAPIToken=USER@REALM!TOKENID=UUID", not "Bearer".
+    let mut value = header::HeaderValue::from_str(&format!("PVEAPIToken={token}")).map_err(|_| {
+        anyhow::anyhow!(
+            "Proxmox token contains characters not valid in HTTP headers (must be visible ASCII)"
+        )
+    })?;
+    // Keeps the token out of `Debug` output and out of HTTP/2 HPACK
+    // dynamic tables (where header values could otherwise be inferred).
+    value.set_sensitive(true);
+    Ok(value)
 }
 
 impl ProxmoxClient {
+    /// A client for `conn`. A pass-entry token is decrypted on the first
+    /// request (see [`PassToken`]), so the server starts even while the GPG
+    /// key is locked.
     pub fn new(conn: Connection) -> anyhow::Result<Self> {
         let Connection {
             url,
-            token,
+            credential,
             insecure,
         } = conn;
-        // Proxmox uses "PVEAPIToken=USER@REALM!TOKENID=UUID", not "Bearer".
-        let auth = format!("PVEAPIToken={token}");
-        let mut auth_value = header::HeaderValue::from_str(&auth).map_err(|_| {
-            anyhow::anyhow!(
-                "Proxmox token contains characters not valid in HTTP headers (must be visible ASCII)"
-            )
-        })?;
-        // Keeps the token out of `Debug` output and out of HTTP/2 HPACK
-        // dynamic tables (where header values could otherwise be inferred).
-        auth_value.set_sensitive(true);
-
         let mut headers = header::HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, auth_value);
+        let auth = match credential {
+            Credential::Env(token) | Credential::File(token) => {
+                headers.insert(header::AUTHORIZATION, auth_header(&token)?);
+                Auth::Static
+            }
+            Credential::Pass(entry) => Auth::Pass(Arc::new(PassToken {
+                entry,
+                state: tokio::sync::Mutex::new(TokenState::default()),
+            })),
+        };
 
         let http = Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
@@ -88,6 +186,7 @@ impl ProxmoxClient {
         Ok(Self {
             http,
             base_url: url.trim_end_matches('/').to_string(),
+            auth,
         })
     }
 
@@ -104,7 +203,22 @@ impl ProxmoxClient {
         {
             debug!(target: LOG_TARGET, method = %req.method(), url = %req.url(), "proxmox request");
         }
+        let (builder, sent) = match &self.auth {
+            Auth::Static => (builder, None),
+            Auth::Pass(token) => {
+                let value = token.header().await?;
+                (
+                    builder.header(header::AUTHORIZATION, value.clone()),
+                    Some(value),
+                )
+            }
+        };
         let resp = builder.send().await?;
+        if resp.status() == StatusCode::UNAUTHORIZED
+            && let (Auth::Pass(token), Some(sent)) = (&self.auth, &sent)
+        {
+            token.mark_rejected(sent).await;
+        }
         let body = handle_response(resp).await?;
 
         // Some endpoints (notably storage content) answer 200 with an empty
@@ -167,7 +281,7 @@ fn unwrap_data(v: Value) -> Value {
 pub fn mock_client(uri: &str) -> ProxmoxClient {
     ProxmoxClient::new(Connection {
         url: uri.to_string(),
-        token: "root@pam!mcp=secret".to_string(),
+        credential: Credential::File("root@pam!mcp=secret".to_string()),
         insecure: false,
     })
     .unwrap()
@@ -370,5 +484,140 @@ mod tests {
             body,
         };
         assert!(e.to_tool_message().ends_with("… (truncated)"));
+    }
+
+    mod pass_auth {
+        use super::*;
+        use crate::credentials::PassStore;
+        use crate::credentials::test_support::{LOCKED_SNIPPET, fake_gpg, ok_snippet};
+
+        const OLD: &str = "root@pam!mcp=old-secret";
+        const NEW: &str = "root@pam!mcp=rotated-secret";
+
+        fn pass_client(
+            server: &MockServer,
+        ) -> (tempfile::TempDir, std::path::PathBuf, ProxmoxClient) {
+            let dir = tempfile::tempdir().unwrap();
+            let entry = PassStore::new(dir.path(), fake_gpg()).entry("t").unwrap();
+            let file = entry.path();
+            let client = ProxmoxClient::new(Connection {
+                url: server.uri(),
+                credential: Credential::Pass(entry),
+                insecure: false,
+            })
+            .unwrap();
+            (dir, file, client)
+        }
+
+        fn version_ok() -> ResponseTemplate {
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"release": "9.0"}}))
+        }
+
+        #[tokio::test]
+        async fn locked_key_fails_then_succeeds_after_unlock() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/version"))
+                .and(header(
+                    "Authorization",
+                    format!("PVEAPIToken={OLD}").as_str(),
+                ))
+                .respond_with(version_ok())
+                .expect(2)
+                .mount(&server)
+                .await;
+            let (_dir, file, client) = pass_client(&server);
+
+            std::fs::write(&file, LOCKED_SNIPPET).unwrap();
+            let err = client.get("/version", &[]).await.unwrap_err();
+            assert!(matches!(err, ProxmoxError::Credentials(_)), "{err}");
+            assert!(
+                err.to_tool_message().contains("proxmox-mcp unlock"),
+                "{err}"
+            );
+
+            // "Unlock": the next request decrypts successfully — no restart.
+            std::fs::write(&file, ok_snippet(OLD)).unwrap();
+            client.get("/version", &[]).await.unwrap();
+
+            // Cached in memory: re-locking the key doesn't affect this process.
+            std::fs::write(&file, LOCKED_SNIPPET).unwrap();
+            client.get("/version", &[]).await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn unauthorized_drops_cached_token() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/version"))
+                .and(header(
+                    "Authorization",
+                    format!("PVEAPIToken={OLD}").as_str(),
+                ))
+                .respond_with(ResponseTemplate::new(401))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/version"))
+                .and(header(
+                    "Authorization",
+                    format!("PVEAPIToken={NEW}").as_str(),
+                ))
+                .respond_with(version_ok())
+                .mount(&server)
+                .await;
+            let (_dir, file, client) = pass_client(&server);
+
+            std::fs::write(&file, ok_snippet(OLD)).unwrap();
+            assert!(client.get("/version", &[]).await.is_err());
+            // Rotated in the store (e.g. via `proxmox-mcp login`) — picked up.
+            std::fs::write(&file, ok_snippet(NEW)).unwrap();
+            client.get("/version", &[]).await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn rejected_token_with_locked_key_reports_the_real_401() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/version"))
+                .respond_with(ResponseTemplate::new(401))
+                .mount(&server)
+                .await;
+            let (_dir, file, client) = pass_client(&server);
+
+            std::fs::write(&file, ok_snippet(OLD)).unwrap();
+            assert!(client.get("/version", &[]).await.is_err());
+            // gpg-agent's cache expires; the 401 must not turn into "locked".
+            std::fs::write(&file, LOCKED_SNIPPET).unwrap();
+            let err = client.get("/version", &[]).await.unwrap_err();
+            assert!(
+                matches!(err, ProxmoxError::Api { status, .. } if status == StatusCode::UNAUTHORIZED),
+                "{err}"
+            );
+        }
+
+        #[tokio::test]
+        async fn concurrent_first_requests_decrypt_once() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/version"))
+                .respond_with(version_ok())
+                .mount(&server)
+                .await;
+            let (dir, file, client) = pass_client(&server);
+            // Each decrypt appends a line to a counter file.
+            let counter = dir.path().join("decrypts");
+            std::fs::write(
+                &file,
+                format!("echo x >> '{}'\n{}", counter.display(), ok_snippet(OLD)),
+            )
+            .unwrap();
+            let calls = (0..8).map(|_| client.get("/version", &[]));
+            for r in futures::future::join_all(calls).await {
+                r.unwrap();
+            }
+            let n = std::fs::read_to_string(&counter).unwrap().lines().count();
+            assert_eq!(n, 1, "gpg ran {n} times");
+        }
     }
 }

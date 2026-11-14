@@ -28,6 +28,8 @@ doc_markdown = "allow"
 wildcard_imports = "allow"
 
 [dependencies]
+rpassword = "7"
+percent-encoding = "2"
 rmcp = { version = "3.9", features = [
     "server",
     "macros",
@@ -49,6 +51,10 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 [dev-dependencies]
 tempfile = "3"
 wiremock = "0.6"
+# tests/launch_path.rs: a local HTTPS stand-in for Proxmox (the server
+# refuses plain HTTP, so wiremock can't sit behind a cluster file).
+rcgen = "0.14"
+tokio-rustls = "0.26"
 
 [profile.release]
 lto = true

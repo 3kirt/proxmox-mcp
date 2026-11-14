@@ -855,7 +855,7 @@ impl ServerHandler for ProxmoxMcpServer {
 mod tests {
     use super::*;
     use crate::client::mock_client;
-    use crate::config::Connection;
+    use crate::config::{Connection, Credential};
     use params::encode_seg;
     use rmcp::handler::server::wrapper::Parameters;
     use serde::de::DeserializeOwned;
@@ -911,7 +911,7 @@ mod tests {
             .map(|(name, uri)| {
                 let conn = Connection {
                     url: (*uri).to_string(),
-                    token: format!("root@pam!mcp=secret-{name}"),
+                    credential: Credential::File(format!("root@pam!mcp=secret-{name}")),
                     insecure: false,
                 };
                 ((*name).to_string(), conn)
