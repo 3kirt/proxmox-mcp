@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-14
+
+Fixes from a second review of the GPG token code: unlock advice that names the
+right config and keyring, safer temp files, and a retry after token rotation.
+
 ### Fixed
 - The "token is locked" and "no token stored" messages name the server's own
   `--config-dir` (when it isn't the default) and its GnuPG home, shell-quoted,
