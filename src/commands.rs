@@ -67,8 +67,11 @@ pub struct ClusterArgs {
 
 /// Verify a token, encrypt it into the store, and point the cluster file at it.
 pub async fn login(config_dir: Option<&Path>, args: LoginArgs) -> anyhow::Result<()> {
-    let cfg = Config::load_or_empty(config_dir)?;
+    let (cfg, skipped) = Config::load_or_empty(config_dir)?;
+    let explicit_cluster = args.cluster.is_some();
     let cluster = target_cluster(&cfg, args.cluster)?;
+    let target_path = cfg.cluster_path(&cluster);
+    check_skipped(skipped, &target_path, explicit_cluster)?;
     let (url, url_from_env) = match args.url {
         Some(u) => (u.trim().to_string(), false),
         None => match (cfg.file_url(&cluster), config::env_var("PROXMOX_URL")) {
@@ -118,7 +121,8 @@ pub async fn login(config_dir: Option<&Path>, args: LoginArgs) -> anyhow::Result
         );
     }
 
-    let path = cfg.cluster_path(&cluster);
+    let gpg_path = find_on_path(store.gpg());
+    let path = target_path;
     let previous_url = cfg.file_url(&cluster).map(str::to_owned);
     let mut removed_plaintext = false;
     config::update_cluster_file(&path, |obj| {
@@ -133,7 +137,13 @@ pub async fn login(config_dir: Option<&Path>, args: LoginArgs) -> anyhow::Result
         if let Some(home) = store.homedir() {
             obj.insert("gnupg_home".into(), home.display().to_string().into());
         }
-        if args.insecure {
+        // ...and the gpg binary: a client's minimal PATH may not have it.
+        if let Some(gpg) = &gpg_path {
+            obj.insert("gpg".into(), gpg.display().to_string().into());
+        }
+        // Whatever TLS setting the verification above used, including one
+        // from PROXMOX_INSECURE, which a GUI-launched server won't see.
+        if insecure {
             obj.insert("insecure".into(), true.into());
         }
         removed_plaintext = obj.remove("token").is_some();
@@ -195,6 +205,27 @@ fn recipients_for(
     })
 }
 
+/// Other clusters' broken files don't block a login, but the target's own
+/// file must load, and the default can't be chosen without them all.
+fn check_skipped(
+    skipped: Vec<config::SkippedFile>,
+    target_path: &Path,
+    explicit_cluster: bool,
+) -> anyhow::Result<()> {
+    for file in skipped {
+        if file.path == target_path {
+            return Err(file.error.context("fix this cluster file first"));
+        }
+        if !explicit_cluster {
+            return Err(file
+                .error
+                .context("fix it, or pass --cluster NAME to log in to another cluster"));
+        }
+        eprintln!("Warning: skipping {:#}", file.error);
+    }
+    Ok(())
+}
+
 /// The cluster a command acts on: `--cluster`, else the default cluster.
 fn target_cluster(cfg: &Config, explicit: Option<String>) -> anyhow::Result<String> {
     if let Some(name) = explicit {
@@ -231,11 +262,32 @@ fn choose_entry_name(
 /// Whether two configured URLs address the same API (`https://h:8006` and
 /// `https://h:8006/api2/json/` do).
 fn same_url(a: &str, b: &str) -> bool {
-    let norm = |u: &str| {
-        let u = u.trim().trim_end_matches('/');
-        u.strip_suffix("/api2/json").unwrap_or(u).to_string()
-    };
-    norm(a) == norm(b)
+    config::normalize_url(a.trim()) == config::normalize_url(b.trim())
+}
+
+/// The absolute path of a bare program name (`gpg`) found on `PATH`, so
+/// `login` can record it. `None` for an already-explicit path (it came from
+/// the cluster file) or when it isn't found.
+fn find_on_path(program: &Path) -> Option<PathBuf> {
+    if program.components().count() != 1 {
+        return None;
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(program))
+        .find(|candidate| is_executable(candidate))
+}
+
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
 }
 
 /// `proxmox-mcp/<host>`, with `_<port>` for a port other than 8006.
@@ -317,29 +369,43 @@ pub async fn unlock(config_dir: Option<&Path>, args: ClusterArgs) -> anyhow::Res
     }
     note_env_token_precedence();
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut failed: Vec<String> = Vec::new();
     for (cluster, entry) in entries {
         if !seen.insert(entry.path()) {
             continue;
         }
-        match entry.read_token().await {
-            Ok(_) => {
-                eprintln!("{cluster}: already unlocked.");
-                continue;
-            }
-            Err(PassError::Locked { .. }) => {}
-            Err(e) => return Err(anyhow!(e).context(format!("cluster \"{cluster}\""))),
+        // One cluster's problem (e.g. a logged-out entry) must not stop the
+        // others from being unlocked.
+        if let Err(e) = unlock_entry(&cluster, &entry).await {
+            eprintln!("{cluster}: error: {e}");
+            failed.push(cluster);
         }
-        eprintln!("{cluster}: unlocking {}", entry.path().display());
-        entry.unlock_interactive().await?;
-        // Confirm the way the server will read it: non-interactively.
-        entry.read_token().await?;
-        eprintln!("{cluster}: unlocked.");
     }
     eprintln!(
         "The server can now read the tokens until gpg-agent's cache expires \
          (default-cache-ttl / max-cache-ttl in gpg-agent.conf); a running server keeps \
          each one in memory after its first successful read."
     );
+    if !failed.is_empty() {
+        bail!("could not unlock: {}", failed.join(", "));
+    }
+    Ok(())
+}
+
+async fn unlock_entry(cluster: &str, entry: &PassEntry) -> Result<(), PassError> {
+    match entry.read_token().await {
+        Ok(_) => {
+            eprintln!("{cluster}: already unlocked.");
+            return Ok(());
+        }
+        Err(PassError::Locked { .. }) => {}
+        Err(e) => return Err(e),
+    }
+    eprintln!("{cluster}: unlocking {}", entry.path().display());
+    entry.unlock_interactive().await?;
+    // Confirm the way the server will read it: non-interactively.
+    entry.read_token().await?;
+    eprintln!("{cluster}: unlocked.");
     Ok(())
 }
 
@@ -348,25 +414,35 @@ pub async fn unlock(config_dir: Option<&Path>, args: ClusterArgs) -> anyhow::Res
 pub async fn status(config_dir: Option<&Path>, args: ClusterArgs) -> anyhow::Result<()> {
     let cfg = Config::load(config_dir)?;
     eprintln!("Config dir:   {}", cfg.dir().display());
-    let default = cfg.default_name();
+    let env_only = cfg.names().is_empty();
+    let explicit = args.cluster.is_some();
     let mut clusters = selected_clusters(&cfg, args.cluster)?;
-    match &default {
-        Ok(Some(name)) => eprintln!("Default:      {name}"),
-        Ok(None) => {
-            eprintln!(
-                "Default:      {} (environment only)",
-                config::ENV_CLUSTER_NAME
-            );
-            clusters.push(config::ENV_CLUSTER_NAME.to_string());
+    // The cluster the PROXMOX_* overrides apply to, as `resolve()` picks it.
+    // `None` when no default can be chosen: then no cluster gets them (the
+    // server would refuse to start), rather than guessing one.
+    let default = match cfg.default_name() {
+        Ok(name) => {
+            let name = name.unwrap_or_else(|| config::ENV_CLUSTER_NAME.to_string());
+            let note = if env_only { " (environment only)" } else { "" };
+            eprintln!("Default:      {name}{note}");
+            Some(name)
         }
-        Err(e) => eprintln!("Default:      error: {e}"),
+        Err(e) => {
+            eprintln!("Default:      error: {e}");
+            None
+        }
+    };
+    if env_only
+        && !explicit
+        && let Some(name) = &default
+    {
+        clusters.push(name.clone());
     }
-    let default = default.ok().flatten();
-    let default = default.as_deref().unwrap_or(config::ENV_CLUSTER_NAME);
     for cluster in clusters {
         eprintln!();
         eprintln!("[{cluster}]");
-        cluster_status(&cfg, &cluster, cluster == default).await;
+        let is_default = default.as_deref() == Some(cluster.as_str());
+        cluster_status(&cfg, &cluster, is_default).await;
     }
     Ok(())
 }
@@ -580,5 +656,62 @@ mod tests {
         assert_eq!(target_cluster(&c, None).unwrap(), "lab");
         assert_eq!(target_cluster(&c, Some("new".into())).unwrap(), "new");
         assert!(target_cluster(&c, Some("bad name".into())).is_err());
+    }
+
+    #[test]
+    fn only_the_target_clusters_broken_file_blocks_login() {
+        let skipped = |name: &str| config::SkippedFile {
+            path: PathBuf::from(format!("/c/{name}.json")),
+            error: anyhow!("cluster file /c/{name}.json: bad JSON"),
+        };
+        let target = Path::new("/c/lab.json");
+        assert!(check_skipped(vec![skipped("other")], target, true).is_ok());
+        let err = check_skipped(vec![skipped("lab")], target, true).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("fix this cluster file"),
+            "{err:#}"
+        );
+        // Without --cluster the default depends on every file.
+        let err = check_skipped(vec![skipped("other")], target, false).unwrap_err();
+        assert!(format!("{err:#}").contains("--cluster"), "{err:#}");
+    }
+
+    #[test]
+    fn same_url_ignores_api_path_slashes_and_whitespace() {
+        assert!(same_url("https://h:8006", " https://h:8006/api2/json/ "));
+        assert!(!same_url("https://h:8006", "https://h:8443"));
+    }
+
+    #[test]
+    fn explicit_gpg_paths_are_not_looked_up() {
+        assert_eq!(find_on_path(Path::new("/opt/homebrew/bin/gpg")), None);
+        assert_eq!(find_on_path(Path::new("no-such-program-pmx")), None);
+    }
+
+    #[tokio::test]
+    async fn unlock_continues_past_a_broken_entry() {
+        use crate::credentials::test_support::{fake_gpg, ok_snippet};
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        // "a" was logged out (no entry); "b" decrypts without a prompt.
+        std::fs::write(store.join("b.gpg"), ok_snippet("b@pve!t=s")).unwrap();
+        let file = |entry: &str| {
+            serde_json::json!({
+                "url": "https://pve.example.com",
+                "pass_entry": entry,
+                "password_store_dir": store,
+                "gpg": fake_gpg(),
+            })
+            .to_string()
+        };
+        let a = file("a");
+        let b = file("b");
+        let (d, _) = cfg(&[("a.json", &a), ("b.json", &b)]);
+        let err = unlock(Some(d.path()), ClusterArgs { cluster: None })
+            .await
+            .unwrap_err();
+        // "b" was still checked (and is fine); only "a" is reported.
+        assert_eq!(err.to_string(), "could not unlock: a");
     }
 }

@@ -104,6 +104,10 @@ impl PassStore {
             Some(dir) => Some(expand_tilde(dir)?),
             None => crate::config::env_var("GNUPGHOME").map(PathBuf::from),
         };
+        // Absolute, so the paths `login` records mean the same thing to a
+        // server started from another working directory.
+        let root = std::path::absolute(&root)?;
+        let homedir = homedir.map(std::path::absolute).transpose()?;
         let gpg = loc
             .gpg
             .map_or_else(|| Ok(PathBuf::from("gpg")), expand_tilde)?;
@@ -157,6 +161,12 @@ impl PassStore {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The gpg program this store runs (as configured; may be a bare name
+    /// looked up on `PATH`).
+    pub fn gpg(&self) -> &Path {
+        &self.gpg
     }
 
     /// `gpgconf` from the same directory as an explicitly located `gpg`
@@ -353,12 +363,13 @@ impl PassEntry {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         let mut child = cmd.spawn().map_err(|e| spawn_err(&self.store.gpg, &e))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(format!("{token}\n").as_bytes())
-                .await
-                .map_err(|e| io_err("writing to gpg for", &path, &e))?;
-        }
+        // Don't bail on a write error yet: if gpg exited early (e.g. a
+        // recipient with no public key), its stderr explains why, and the
+        // temp file still needs cleaning up. Dropping stdin closes the pipe.
+        let written = match child.stdin.take() {
+            Some(mut stdin) => stdin.write_all(format!("{token}\n").as_bytes()).await,
+            None => Ok(()),
+        };
         let result = tokio::time::timeout(self.store.timeout, child.wait_with_output()).await;
         let finish = || -> Result<(), PassError> {
             let output = result
@@ -374,6 +385,7 @@ impl PassEntry {
                     human_message(&String::from_utf8_lossy(&output.stderr))
                 )));
             }
+            written.map_err(|e| io_err("writing to gpg for", &path, &e))?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -509,7 +521,8 @@ fn human_message(stderr: &str) -> String {
     }
 }
 
-fn create_private_dir(dir: &Path) -> Result<(), PassError> {
+/// Create `dir` and its parents, owner-only (0700) on Unix.
+pub fn create_private_dir(dir: &Path) -> Result<(), PassError> {
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -806,6 +819,48 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o077, 0, "entry is group/world accessible: {mode:o}");
         }
+    }
+
+    #[tokio::test]
+    async fn early_gpg_exit_reports_gpg_error_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // A gpg that rejects the recipient without reading stdin.
+        let gpg = dir.path().join("failing-gpg");
+        std::fs::write(
+            &gpg,
+            "#!/bin/sh\necho 'gpg: K1: skipped: No public key' >&2\nexit 2\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&gpg, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let store = PassStore::new(dir.path().join("store"), &gpg);
+        let entry = store.entry("t").unwrap();
+        // Large enough that the write can't fit in the pipe buffer before
+        // gpg exits.
+        let token = "x".repeat(1 << 20);
+        let err = entry.write_token(&token, &["K1".into()]).await.unwrap_err();
+        assert!(err.to_string().contains("No public key"), "{err}");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path().join("store"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+    }
+
+    #[test]
+    fn relative_store_paths_are_made_absolute() {
+        let store = PassStore::resolve(&StoreLocation {
+            gpg: None,
+            store_dir: Some("rel-store"),
+            gnupg_home: Some("rel-gnupg"),
+        })
+        .unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(store.root(), cwd.join("rel-store"));
+        assert_eq!(store.homedir(), Some(cwd.join("rel-gnupg").as_path()));
     }
 
     #[test]
