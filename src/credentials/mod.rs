@@ -13,6 +13,8 @@
 
 #[cfg(unix)]
 pub mod agent;
+#[cfg(test)]
+mod real_gpg;
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;

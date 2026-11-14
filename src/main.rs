@@ -101,6 +101,7 @@ fn log_directive(rust_log: Option<&str>, debug: bool) -> String {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    client::install_crypto_provider();
 
     let directive = log_directive(std::env::var("RUST_LOG").ok().as_deref(), args.debug);
     let writer = match &args.log_file {

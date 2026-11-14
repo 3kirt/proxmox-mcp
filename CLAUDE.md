@@ -5,17 +5,43 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```sh
-make build       # cargo build --release
-make test        # cargo test --all
-make lint        # cargo clippy --all-targets -D warnings && cargo fmt --check
-make install     # cargo install --path . (installs to ~/.cargo/bin)
-make clean       # remove build artifacts
+make check          # pre-release gate: fmt-check lint test deny release smoke
+make build          # cargo build (debug); `make release` for the release build
+make test           # cargo test --all (includes tests/launch_path.rs)
+make lint           # secrets-scan + clippy --all-targets -D warnings + fmt --check
+make fmt            # cargo fmt
+make deny           # cargo deny check (advisories, bans, sources, licenses)
+make msrv           # cargo +<rust-version> test --all
+make smoke          # scripts/smoke.py against BIN (default target/release/proxmox-mcp)
+make test-real-gpg  # REAL_GPG=1: classification against the real gpg (makes throwaway keys)
+make install        # cargo install --path . (installs to ~/.cargo/bin)
 
 cargo test <test_name>   # run a single test
 ```
 
-Formatting and lint must be clean before every commit: `cargo fmt`, then
-`cargo clippy --all-targets -- -D warnings`.
+Every cargo invocation in the Makefile is `--locked`. Formatting and lint must be
+clean before every commit: `make fmt`, then `make lint`.
+
+**CI/CD** (shared shape with gitlab-mcp and netbox-mcp): the Makefile is the single
+source of truth, and the workflows only call its targets.
+- `ci.yml` runs lint, test on ubuntu and macos, real-gpg and deny, plus msrv
+  except on PRs. `release.yml` calls it as a gate.
+- `release.yml` runs verify (tag == Cargo.toml version, the tag is on main, and
+  the CHANGELOG has a section), then the 4-target build with `make smoke` on each
+  artifact, then publish (checksums, provenance attestation, notes from
+  `scripts/changelog-section.sh`).
+- `scheduled.yml` runs weekly: deny, msrv, stable/beta drift and real gpg. A
+  failure opens a `scheduled-failure` issue.
+- Actions are pinned by commit SHA, with a `# vX.Y.Z` comment.
+
+The toolchain is pinned in `rust-toolchain.toml` (1.100.0). The MSRV is
+`rust-version` in Cargo.toml (1.88); keep it buildable. TLS is rustls on **ring**
+only: reqwest uses `rustls-no-provider`, and `client::install_crypto_provider()`
+installs ring. cargo-deny bans aws-lc-sys/aws-lc-rs; check with
+`cargo tree -i aws-lc-sys`. A new license in the tree must be GPL-3.0-compatible
+before it goes into `deny.toml`. The tool count lives in two places, which must
+change together: `EXPECTED_TOOLS` in `tools/mod.rs` and in `scripts/smoke.py`.
+CHANGELOG headings are `## [X.Y.Z] - YYYY-MM-DD`.
 
 Clippy runs at **pedantic** strictness: the `pedantic`, `nursery`, and `cargo`
 lint groups are enabled in `Cargo.toml` under `[lints.clippy]`, with a curated,

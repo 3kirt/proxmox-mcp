@@ -69,6 +69,8 @@ struct FakeProxmox {
 }
 
 async fn fake_proxmox() -> FakeProxmox {
+    // Built with ring only (no aws-lc-rs), so install it explicitly.
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
     let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()]).unwrap();
     let config = ServerConfig::builder()
         .with_no_client_auth()

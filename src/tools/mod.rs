@@ -958,6 +958,19 @@ mod tests {
     // Tool registry and argument errors
     // ------------------------------------------------------------------
 
+    /// Must change together with `EXPECTED_TOOLS` in `scripts/smoke.py`,
+    /// which checks the same count through the release binary.
+    const EXPECTED_TOOLS: usize = 28;
+
+    #[test]
+    fn router_exposes_every_tool() {
+        assert_eq!(
+            ProxmoxMcpServer::tool_router().list_all().len(),
+            EXPECTED_TOOLS,
+            "tool count changed: update EXPECTED_TOOLS here and in scripts/smoke.py"
+        );
+    }
+
     #[test]
     fn every_tool_is_annotated_read_only() {
         // This server wraps only Proxmox GET endpoints, so every tool must
