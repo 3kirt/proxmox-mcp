@@ -95,7 +95,10 @@ pub async fn login(config_dir: Option<&Path>, args: LoginArgs) -> anyhow::Result
     let entry = store.entry(&entry_name)?;
 
     // Settle every local precondition before prompting for the secret or
-    // calling Proxmox, so a missing .gpg-id doesn't waste a token entry.
+    // calling Proxmox, so a missing .gpg-id doesn't waste a token entry, and
+    // an unwritable cluster file can't leave the store changed (entry and
+    // .gpg-id written) with nothing pointing at it.
+    config::check_writable(&target_path)?;
     let (recipients, init_id) = recipients_for(&store, &entry, args.gpg_id)?;
 
     let token = read_token_input(args.token_stdin)?;

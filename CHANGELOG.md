@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The "token is locked" and "no token stored" messages name the server's own
+  `--config-dir` (when it isn't the default) and its GnuPG home, shell-quoted,
+  so the suggested `proxmox-mcp unlock` or `gpg --homedir … --decrypt` reaches
+  the entry and keyring the server actually uses.
+- The first call after `login` rotates a token now succeeds. A 401 re-reads
+  the entry at once and retries the request once if the token changed.
+- `login` checks that the cluster file can be written before it prompts or
+  touches the store, so a failed write can't leave a `.gpg-id` behind that
+  blocks the retry.
+- `status` ignores expired, revoked, disabled and invalid subkeys when judging
+  whether the key is unlocked.
+
+### Security
+- Cluster-file rewrites and token writes claim their temp file with
+  `create_new` (0600). A file or symlink planted at the predictable temp path
+  now fails the write instead of being followed, and isn't deleted.
+
 ## [0.16.0] - 2026-11-14
 
 GPG-encrypted cluster tokens with `login`/`unlock`/`status` subcommands, TLS

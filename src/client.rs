@@ -222,22 +222,7 @@ impl ProxmoxClient {
         {
             debug!(target: LOG_TARGET, method = %req.method(), url = %req.url(), "proxmox request");
         }
-        let (builder, sent) = match &self.auth {
-            Auth::Static => (builder, None),
-            Auth::Pass(token) => {
-                let value = token.header().await?;
-                (
-                    builder.header(header::AUTHORIZATION, value.clone()),
-                    Some(value),
-                )
-            }
-        };
-        let resp = builder.send().await?;
-        if resp.status() == StatusCode::UNAUTHORIZED
-            && let (Auth::Pass(token), Some(sent)) = (&self.auth, &sent)
-        {
-            token.mark_rejected(sent).await;
-        }
+        let resp = self.send(builder).await?;
         let body = handle_response(resp).await?;
 
         // Some endpoints (notably storage content) answer 200 with an empty
@@ -255,6 +240,51 @@ impl ProxmoxClient {
             return Err(ProxmoxError::Partial(errors.to_string()));
         }
         Ok(unwrap_data(body))
+    }
+}
+
+impl ProxmoxClient {
+    /// Send a request, attaching a pass-backed token when there is one.
+    ///
+    /// When Proxmox rejects the pass token (401), the entry is re-read at once
+    /// and, if it now holds a *different* token (rotated with
+    /// `proxmox-mcp login`), the request is retried once with it, so the
+    /// first call after a rotation succeeds. Every request is a GET, so the
+    /// retry is always safe.
+    async fn send(
+        &self,
+        builder: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, ProxmoxError> {
+        let Auth::Pass(token) = &self.auth else {
+            return Ok(builder.send().await?);
+        };
+        let sent = token.header().await?;
+        let retry = builder.try_clone();
+        let resp = builder
+            .header(header::AUTHORIZATION, sent.clone())
+            .send()
+            .await?;
+        if resp.status() != StatusCode::UNAUTHORIZED {
+            return Ok(resp);
+        }
+        token.mark_rejected(&sent).await;
+        let Some(retry) = retry else {
+            return Ok(resp);
+        };
+        // Re-reads the entry (or, inside the re-read backoff, returns `sent`).
+        let fresh = token.header().await?;
+        if fresh == sent {
+            return Ok(resp);
+        }
+        debug!(target: LOG_TARGET, "Proxmox rejected the token; retrying with the re-read one");
+        let resp = retry
+            .header(header::AUTHORIZATION, fresh.clone())
+            .send()
+            .await?;
+        if resp.status() == StatusCode::UNAUTHORIZED {
+            token.mark_rejected(&fresh).await;
+        }
+        Ok(resp)
     }
 }
 
@@ -590,6 +620,42 @@ mod tests {
             std::fs::write(&file, ok_snippet(OLD)).unwrap();
             assert!(client.get("/version", &[]).await.is_err());
             // Rotated in the store (e.g. via `proxmox-mcp login`) — picked up.
+            std::fs::write(&file, ok_snippet(NEW)).unwrap();
+            client.get("/version", &[]).await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn first_call_after_rotation_retries_with_the_new_token() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/version"))
+                .and(header(
+                    "Authorization",
+                    format!("PVEAPIToken={OLD}").as_str(),
+                ))
+                .respond_with(version_ok())
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/version"))
+                .and(header(
+                    "Authorization",
+                    format!("PVEAPIToken={NEW}").as_str(),
+                ))
+                .respond_with(version_ok())
+                .mount(&server)
+                .await;
+            // Anything else (the old token after its first use) is rejected.
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(401))
+                .mount(&server)
+                .await;
+            let (_dir, file, client) = pass_client(&server);
+
+            std::fs::write(&file, ok_snippet(OLD)).unwrap();
+            client.get("/version", &[]).await.unwrap();
+            // `login` rotates the token: the old one is now revoked.
             std::fs::write(&file, ok_snippet(NEW)).unwrap();
             client.get("/version", &[]).await.unwrap();
         }

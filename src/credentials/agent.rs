@@ -108,7 +108,10 @@ pub async fn encryption_keygrips(
 
 /// In colon listings a `grp` record carries the keygrip (field 10) of the
 /// `sec`/`ssb` record before it, whose field 12 lists its capabilities;
-/// a lowercase `e` means that specific (sub)key can encrypt.
+/// a lowercase `e` means that specific (sub)key can encrypt. Field 2 is its
+/// validity: an expired (`e`), revoked (`r`), disabled (`d`) or invalid (`i`)
+/// subkey is skipped, since gpg won't decrypt with it, so its cached
+/// passphrase must not make `status` report "unlocked".
 fn parse_encryption_keygrips(colons: &str) -> Vec<String> {
     let mut grips = Vec::new();
     let mut want = false;
@@ -116,7 +119,10 @@ fn parse_encryption_keygrips(colons: &str) -> Vec<String> {
         let fields: Vec<&str> = line.split(':').collect();
         match fields.first().copied() {
             Some("sec" | "ssb") => {
-                want = fields.get(11).is_some_and(|caps| caps.contains('e'));
+                let usable = !fields
+                    .get(1)
+                    .is_some_and(|v| matches!(*v, "e" | "r" | "d" | "i"));
+                want = usable && fields.get(11).is_some_and(|caps| caps.contains('e'));
             }
             Some("grp") => {
                 if want && let Some(grip) = fields.get(9).filter(|g| !g.is_empty()) {
@@ -284,6 +290,17 @@ ssb:u:255:18:D8936DA9BE6E9ED2:1794667539::::::e:::+::cv25519::
 fpr:::::::::072C6325E520F5883F6F4889D8936DA9BE6E9ED2:
 grp:::::::::DA8860143E78BEEF72E4C9232E98A0E2C7014E13:
 ";
+
+    #[test]
+    fn expired_revoked_disabled_or_invalid_subkeys_are_skipped() {
+        for validity in ["e", "r", "d", "i"] {
+            let colons = COLONS.replace("ssb:u:", &format!("ssb:{validity}:"));
+            assert!(
+                parse_encryption_keygrips(&colons).is_empty(),
+                "validity {validity} selected"
+            );
+        }
+    }
 
     #[test]
     fn only_encryption_subkey_grips_are_selected() {
