@@ -84,12 +84,15 @@ impl ClusterFile {
 
     /// The password store this cluster's `gpg` / `password_store_dir` /
     /// `gnupg_home` point at (each falling back to the environment).
-    fn pass_store(&self) -> anyhow::Result<PassStore> {
-        PassStore::resolve(&StoreLocation {
+    /// `config_dir` is a non-default `--config-dir`, named in the store's
+    /// unlock/login advice.
+    fn pass_store(&self, config_dir: Option<&Path>) -> anyhow::Result<PassStore> {
+        Ok(PassStore::resolve(&StoreLocation {
             gpg: self.gpg.as_deref(),
             store_dir: self.password_store_dir.as_deref(),
             gnupg_home: self.gnupg_home.as_deref(),
-        })
+        })?
+        .with_config_dir(config_dir.map(Path::to_path_buf)))
     }
 }
 
@@ -157,6 +160,9 @@ pub struct SkippedFile {
 pub struct Config {
     /// The directory the files came from, for error messages.
     dir: PathBuf,
+    /// Whether `dir` came from `--config-dir` rather than the default, so
+    /// advice like "run `proxmox-mcp unlock`" can name it.
+    explicit: bool,
     clusters: BTreeMap<String, ClusterFile>,
 }
 
@@ -168,7 +174,10 @@ impl Config {
     /// so a typo'd `--config-dir` fails loudly.
     pub fn load(dir: Option<&Path>) -> anyhow::Result<Self> {
         match dir {
-            Some(d) => Self::load_dir(d, true),
+            Some(d) => Ok(Self {
+                explicit: true,
+                ..Self::load_dir(d, true)?
+            }),
             None => Self::load_dir(&default_config_dir()?, false),
         }
     }
@@ -181,6 +190,7 @@ impl Config {
     /// block logging in to a different cluster. The caller decides whether a
     /// skipped file matters.
     pub fn load_or_empty(dir: Option<&Path>) -> anyhow::Result<(Self, Vec<SkippedFile>)> {
+        let explicit = dir.is_some();
         let dir = match dir {
             Some(d) => d.to_path_buf(),
             None => default_config_dir()?,
@@ -190,7 +200,12 @@ impl Config {
             skipped.push(SkippedFile { path, error: err });
             Ok(())
         })?;
-        Ok((config, skipped))
+        Ok((Self { explicit, ..config }, skipped))
+    }
+
+    /// The `--config-dir` to name in user-facing advice, if not the default.
+    fn advice_dir(&self) -> Option<&Path> {
+        self.explicit.then_some(self.dir.as_path())
     }
 
     /// The directory the cluster files were (or would have been) read from.
@@ -227,10 +242,10 @@ impl Config {
     /// `password_store_dir` and `gnupg_home` over the process environment
     /// (or the environment alone when there is no such cluster file yet).
     pub fn pass_store(&self, name: &str) -> anyhow::Result<PassStore> {
-        self.clusters.get(name).map_or_else(
-            || ClusterFile::default().pass_store(),
-            ClusterFile::pass_store,
-        )
+        self.clusters
+            .get(name)
+            .map_or_else(ClusterFile::default, Clone::clone)
+            .pass_store(self.advice_dir())
     }
 
     /// The cluster file's `pass_entry` as an entry, regardless of
@@ -257,6 +272,7 @@ impl Config {
     ) -> anyhow::Result<Self> {
         let mut config = Self {
             dir: dir.to_path_buf(),
+            explicit: false,
             clusters: BTreeMap::new(),
         };
         // Read rather than probing with `exists()`, which reports `false` for
@@ -357,7 +373,8 @@ impl Config {
             None
         };
         let source = cluster.source.clone();
-        resolve_cluster(&cluster, env_token, &self.dir).map_err(|e| match source {
+        resolve_cluster(&cluster, env_token, &self.dir, self.advice_dir()).map_err(|e| match source
+        {
             Some(path) => e.context(format!("cluster file {}", path.display())),
             None => e,
         })
@@ -483,6 +500,7 @@ fn resolve_cluster(
     raw: &ClusterFile,
     env_token: Option<String>,
     dir: &Path,
+    advice_dir: Option<&Path>,
 ) -> anyhow::Result<Connection> {
     let url = raw.url.clone().ok_or_else(|| {
         if raw.source.is_some() {
@@ -507,7 +525,7 @@ fn resolve_cluster(
              \"token\" (`proxmox-mcp login` does this for you)"
         ),
         (None, Some(t), None) => Credential::File(t.clone()),
-        (None, None, Some(entry)) => Credential::Pass(raw.pass_store()?.entry(entry)?),
+        (None, None, Some(entry)) => Credential::Pass(raw.pass_store(advice_dir)?.entry(entry)?),
         (None, None, None) => bail!(
             "Proxmox token not set: set \"token\" in the cluster file (format: \
              USER@REALM!TOKENID=UUID), provide PROXMOX_TOKEN, or run `proxmox-mcp login` \
@@ -616,15 +634,12 @@ pub fn update_cluster_file(
     let mut tmp_name = target.clone().into_os_string();
     tmp_name.push(format!(".tmp{}", std::process::id()));
     let tmp = PathBuf::from(tmp_name);
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
+    // Claim the predictable temp path exclusively, so a planted file or
+    // symlink there fails the write instead of being followed. On that
+    // failure nothing is deleted: whatever is there isn't ours.
+    let mut file = crate::credentials::create_private_file(&tmp)
+        .with_context(|| format!("writing cluster file {}", target.display()))?;
     let write = || -> anyhow::Result<()> {
-        let mut file = opts.open(&tmp)?;
         let mut body = serde_json::to_string_pretty(&serde_json::Value::Object(obj))?;
         body.push('\n');
         std::io::Write::write_all(&mut file, body.as_bytes())?;
@@ -637,6 +652,33 @@ pub fn update_cluster_file(
             let _ = std::fs::remove_file(&tmp);
         })
         .with_context(|| format!("writing cluster file {}", target.display()))
+}
+
+/// Check, before `login` changes anything, that the cluster file at `path`
+/// can be written: an existing file must be writable (and not
+/// world-readable), or else its directory must accept a new file. Creates
+/// the directory if needed, as the real write would.
+pub fn check_writable(path: &Path) -> anyhow::Result<()> {
+    let present = path
+        .try_exists()
+        .with_context(|| format!("checking {}", path.display()))?;
+    if present {
+        check_file_permissions(path).with_context(|| format!("cluster file {}", path.display()))?;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .map(drop)
+            .with_context(|| format!("cluster file {} is not writable", path.display()))?;
+        return Ok(());
+    }
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    crate::credentials::create_private_dir(dir)?;
+    let probe = dir.join(format!(".write-probe{}", std::process::id()));
+    crate::credentials::create_private_file(&probe)
+        .map(drop)
+        .with_context(|| format!("config directory {} is not writable", dir.display()))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
 }
 
 /// Reject world-readable cluster files on Unix to avoid token exposure.
@@ -1236,6 +1278,70 @@ pub mod tests {
             checked += 1;
         }
         assert!(checked >= 1, "expected an mcpServers example in the README");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn update_cluster_file_refuses_a_planted_temp_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lab.json");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "precious").unwrap();
+        let tmp = dir
+            .path()
+            .join(format!("lab.json.tmp{}", std::process::id()));
+        std::os::unix::fs::symlink(&victim, &tmp).unwrap();
+        assert!(update_cluster_file(&path, |_| {}).is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
+        assert!(
+            tmp.symlink_metadata().is_ok(),
+            "the planted link isn't ours to delete"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_writable_rejects_a_read_only_cluster_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lab.json");
+        assert!(check_writable(&path).is_ok(), "new file in a writable dir");
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        // Root can write a 0400 file anyway; only assert where that's not so.
+        if std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .is_err()
+        {
+            let err = check_writable(&path).unwrap_err();
+            assert!(format!("{err:#}").contains("not writable"), "{err:#}");
+        }
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "probe left behind"
+        );
+    }
+
+    #[test]
+    fn pass_advice_names_an_explicit_config_dir_only() {
+        let _guard = lock_env();
+        clear_env();
+        let dir = config_dir(&[("lab.json", PASS)]);
+        let explicit = Config::load(Some(dir.path())).unwrap();
+        let store = explicit.pass_store("lab").unwrap();
+        assert!(store.cli().contains("--config-dir"), "{}", store.cli());
+        let conn = explicit.resolve().unwrap();
+        assert!(
+            pass_entry(default_conn(&conn))
+                .store()
+                .cli()
+                .contains("--config-dir"),
+            "the server's own store must carry it too"
+        );
+        let default = Config::load_dir(dir.path(), false).unwrap();
+        assert_eq!(default.pass_store("lab").unwrap().cli(), "proxmox-mcp");
     }
 
     #[cfg(unix)]

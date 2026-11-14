@@ -40,20 +40,31 @@ const MAX_GPG_MESSAGE: usize = 300;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PassError {
+    /// `cli` is the command prefix that reaches this same config directory
+    /// (see [`PassStore::cli`]), so the advice works for a `--config-dir`.
     #[error(
         "no Proxmox token stored at pass entry '{entry}' ({} does not exist); \
-         run `proxmox-mcp login` to store one",
+         run `{cli} login` to store one",
         path.display()
     )]
-    NotFound { entry: String, path: PathBuf },
+    NotFound {
+        entry: String,
+        path: PathBuf,
+        cli: String,
+    },
+    /// `cli` and `gpg_decrypt` are paste-ready, shell-quoted commands for this
+    /// store's config directory and keyring (`--homedir`).
     #[error(
         "Proxmox token is locked: gpg-agent has no cached passphrase for the key that \
-         decrypts {}. Ask the user to unlock it by running `proxmox-mcp unlock` (or \
-         `gpg --decrypt {} >/dev/null`) in a terminal, then retry.",
-        path.display(),
+         decrypts {}. Ask the user to unlock it by running `{cli} unlock` (or \
+         `{gpg_decrypt} >/dev/null`) in a terminal, then retry.",
         path.display()
     )]
-    Locked { path: PathBuf },
+    Locked {
+        path: PathBuf,
+        cli: String,
+        gpg_decrypt: String,
+    },
     #[error("no secret key in this GnuPG keyring can decrypt {}", path.display())]
     NoSecretKey { path: PathBuf },
     #[error("gpg did not finish decrypting {} within {}s", path.display(), timeout.as_secs())]
@@ -71,6 +82,9 @@ pub struct PassStore {
     /// GnuPG home passed as `--homedir` to gpg/gpgconf; `None` leaves gpg's
     /// own lookup (`$GNUPGHOME`, else `~/.gnupg`).
     homedir: Option<PathBuf>,
+    /// The `--config-dir` the server was started with, when not the default,
+    /// so user-facing advice (`proxmox-mcp unlock`) targets the same files.
+    config_dir: Option<PathBuf>,
     timeout: Duration,
 }
 
@@ -119,8 +133,42 @@ impl PassStore {
             root: root.into(),
             gpg: gpg.into(),
             homedir: None,
+            config_dir: None,
             timeout: GPG_TIMEOUT,
         }
+    }
+
+    /// Record a non-default `--config-dir` for user-facing advice.
+    #[must_use]
+    pub fn with_config_dir(mut self, config_dir: Option<PathBuf>) -> Self {
+        self.config_dir = config_dir;
+        self
+    }
+
+    /// `proxmox-mcp`, plus `--config-dir <dir>` when the store came from a
+    /// non-default config directory, as a shell-quoted command prefix.
+    pub fn cli(&self) -> String {
+        self.config_dir.as_ref().map_or_else(
+            || "proxmox-mcp".to_string(),
+            |d| {
+                format!(
+                    "proxmox-mcp --config-dir {}",
+                    shell_quote(&d.display().to_string())
+                )
+            },
+        )
+    }
+
+    /// A paste-ready `gpg [--homedir H] --decrypt <path>` for `path`.
+    fn gpg_decrypt_command(&self, path: &Path) -> String {
+        let mut cmd = shell_quote(&self.gpg.display().to_string());
+        if let Some(home) = &self.homedir {
+            cmd.push_str(" --homedir ");
+            cmd.push_str(&shell_quote(&home.display().to_string()));
+        }
+        cmd.push_str(" --decrypt ");
+        cmd.push_str(&shell_quote(&path.display().to_string()));
+        cmd
     }
 
     #[must_use]
@@ -243,6 +291,7 @@ impl PassEntry {
             return Err(PassError::NotFound {
                 entry: self.name.clone(),
                 path,
+                cli: self.store.cli(),
             });
         }
 
@@ -279,7 +328,13 @@ impl PassEntry {
         let stderr = String::from_utf8_lossy(&output.stderr);
         match classify_decrypt(output.status.success(), &stderr) {
             DecryptOutcome::Ok => {}
-            DecryptOutcome::Locked => return Err(PassError::Locked { path }),
+            DecryptOutcome::Locked => {
+                return Err(PassError::Locked {
+                    gpg_decrypt: self.store.gpg_decrypt_command(&path),
+                    cli: self.store.cli(),
+                    path,
+                });
+            }
             DecryptOutcome::NoSecretKey => return Err(PassError::NoSecretKey { path }),
             DecryptOutcome::Failed => {
                 return Err(PassError::Other(format!(
@@ -350,6 +405,11 @@ impl PassEntry {
             .file_name()
             .map_or_else(|| "entry".into(), |n| n.to_string_lossy().into_owned());
         let tmp = dir.join(format!(".{file_name}.tmp{}", std::process::id()));
+        // Claim the predictable temp path exclusively (owner-only) before gpg
+        // writes to it, so a planted file or symlink there fails the write
+        // instead of being followed by gpg's `--yes --output`. On failure
+        // nothing is deleted: whatever is there isn't ours.
+        create_private_file(&tmp)?;
 
         let mut cmd = self.store.gpg_command();
         cmd.args(["--batch", "--quiet", "--yes", "--no-tty", "--encrypt"]);
@@ -409,6 +469,7 @@ impl PassEntry {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(PassError::NotFound {
                 entry: self.name.clone(),
                 path,
+                cli: self.store.cli(),
             }),
             Err(e) => Err(io_err("removing", &path, &e)),
         }
@@ -518,6 +579,32 @@ fn human_message(stderr: &str) -> String {
     match msg.char_indices().nth(MAX_GPG_MESSAGE) {
         Some((cut, _)) => format!("{}…", &msg[..cut]),
         None => msg,
+    }
+}
+
+/// Create `path` exclusively (fails if anything, including a symlink, is
+/// already there), owner-only on Unix.
+pub fn create_private_file(path: &Path) -> Result<std::fs::File, PassError> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path).map_err(|e| io_err("creating", path, &e))
+}
+
+/// Quote `s` for a POSIX shell, unless it's made only of characters that
+/// never need quoting.
+pub fn shell_quote(s: &str) -> String {
+    let safe = !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._+-:@%=,".contains(&b));
+    if safe {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
     }
 }
 
@@ -861,6 +948,57 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         assert_eq!(store.root(), cwd.join("rel-store"));
         assert_eq!(store.homedir(), Some(cwd.join("rel-gnupg").as_path()));
+    }
+
+    #[tokio::test]
+    async fn locked_advice_names_the_config_dir_and_keyring() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PassStore::new(dir.path(), fake_gpg())
+            .with_homedir(Some(PathBuf::from("/keys/my gnupg")))
+            .with_config_dir(Some(PathBuf::from("/etc/proxmox mcp")));
+        let entry = store.entry("t").unwrap();
+        std::fs::write(entry.path(), LOCKED_SNIPPET).unwrap();
+        let msg = entry.read_token().await.unwrap_err().to_string();
+        assert!(
+            msg.contains("`proxmox-mcp --config-dir '/etc/proxmox mcp' unlock`"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("--homedir '/keys/my gnupg' --decrypt"),
+            "{msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_config_advice_is_plain_unlock() {
+        let (_dir, entry) = store_with("t", LOCKED_SNIPPET);
+        let msg = entry.read_token().await.unwrap_err().to_string();
+        assert!(msg.contains("`proxmox-mcp unlock`"), "{msg}");
+        assert!(!msg.contains("--homedir"), "{msg}");
+    }
+
+    #[test]
+    fn shell_quote_quotes_only_when_needed() {
+        assert_eq!(shell_quote("/a/b-c_d.gpg"), "/a/b-c_d.gpg");
+        assert_eq!(shell_quote("/a b"), "'/a b'");
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        assert_eq!(shell_quote("~/x"), "'~/x'");
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_token_refuses_a_planted_temp_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = PassStore::new(dir.path(), fake_gpg()).entry("t").unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "precious").unwrap();
+        let tmp = dir.path().join(format!(".t.gpg.tmp{}", std::process::id()));
+        std::os::unix::fs::symlink(&victim, &tmp).unwrap();
+        assert!(entry.write_token("tok-x", &["K1".into()]).await.is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
+        // The planted link is not ours to delete.
+        assert!(tmp.symlink_metadata().is_ok());
     }
 
     #[test]
