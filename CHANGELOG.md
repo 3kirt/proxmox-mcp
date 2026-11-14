@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-14
+
+GPG-encrypted cluster tokens with `login`/`unlock`/`status` subcommands, TLS
+on ring, an Intel Mac binary, and CI/CD shared with gitlab-mcp and netbox-mcp.
+
 ### Added
 - GPG-encrypted tokens: a cluster file can set `pass_entry` (instead of
   `token`) to read its API token from a `pass`-compatible store, decrypted with
@@ -22,8 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write the cluster file), `logout`, `unlock`, and `status` (token source and
   gpg-agent lock state per cluster, without decrypting). With no subcommand
   the server runs over stdio as before.
+  - `login` records what a GUI-launched server needs as absolute paths: the
+    store, `gnupg_home` when `GNUPGHOME` is set, and the `gpg` it found on
+    `PATH`. It also records `"insecure": true` when verification used it,
+    including from `PROXMOX_INSECURE`. Another cluster's broken file is
+    skipped with a warning instead of blocking the login.
+  - `unlock` covers every pass-backed cluster, and reports one it can't
+    unlock without stopping the rest.
 
 ### Changed
+- rmcp 3.10.
 - TLS uses rustls with the ring crypto provider instead of aws-lc-rs, which
   carries OpenSSL-style license terms. cargo-deny now bans aws-lc.
 - Release binaries add darwin amd64 (Intel Mac). The Linux binaries are built
@@ -55,6 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tests/launch_path.rs` runs the built binary over MCP stdio against a local
   HTTPS stand-in for Proxmox. It checks that the pass token is sent when
   `PROXMOX_TOKEN` is unset, empty, or a literal `${PROXMOX_TOKEN}`.
+- The fake-gpg timeout test no longer stalls for 10s on macOS (`exec sleep`).
 
 ## [0.15.0] - 2026-11-09
 
