@@ -11,7 +11,7 @@ use anyhow::{Context, anyhow, bail};
 
 use crate::client::ProxmoxClient;
 use crate::config::{self, Config, Connection, Credential};
-use crate::credentials::{PassEntry, PassError, PassStore};
+use pass_store::{PassEntry, PassError, PassStore};
 
 /// Proxmox's standard API port, left out of default entry names.
 const PROXMOX_PORT: u16 = 8006;
@@ -501,34 +501,8 @@ async fn cluster_status(cfg: &Config, cluster: &str, is_default: bool) {
     eprintln!("Recipients:   {}", recipients.join(", "));
     eprintln!(
         "gpg-agent:    {}",
-        agent_state(entry.store(), &recipients).await
+        pass_store::agent_status(entry.store(), &recipients).await
     );
-}
-
-#[cfg(unix)]
-async fn agent_state(store: &PassStore, recipients: &[String]) -> String {
-    use crate::credentials::agent;
-    let result = async {
-        let grips = agent::encryption_keygrips(store, recipients).await?;
-        if grips.is_empty() {
-            return Ok(agent::AgentState::NoSecretKey);
-        }
-        let socket = agent::agent_socket(store).await?;
-        Ok::<_, String>(
-            agent::query_socket(&socket, &grips)
-                .await?
-                .map_or(agent::AgentState::NotRunning, |infos| {
-                    agent::summarize(&infos)
-                }),
-        )
-    }
-    .await;
-    result.map_or_else(|e| format!("unknown ({e})"), |s| s.to_string())
-}
-
-#[cfg(not(unix))]
-async fn agent_state(_: &PassStore, _: &[String]) -> String {
-    "unknown (gpg-agent query is only supported on Unix)".into()
 }
 
 fn read_token_input(from_stdin: bool) -> anyhow::Result<String> {
@@ -691,9 +665,11 @@ mod tests {
         assert_eq!(find_on_path(Path::new("no-such-program-pmx")), None);
     }
 
-    #[tokio::test]
-    async fn unlock_continues_past_a_broken_entry() {
-        use crate::credentials::test_support::{fake_gpg, ok_snippet};
+    #[test]
+    fn unlock_continues_past_a_broken_entry() {
+        use pass_store::test_support::{fake_gpg, ok_snippet};
+        // Config::load reads PROXMOX_* and resolve() reads GNUPGHOME/HOME.
+        let _guard = crate::config::tests::lock_env();
         let dir = tempfile::tempdir().unwrap();
         let store = dir.path().join("store");
         std::fs::create_dir_all(&store).unwrap();
@@ -711,8 +687,11 @@ mod tests {
         let a = file("a");
         let b = file("b");
         let (d, _) = cfg(&[("a.json", &a), ("b.json", &b)]);
-        let err = unlock(Some(d.path()), ClusterArgs { cluster: None })
-            .await
+        // A sync test driving its own runtime, so the env guard is never held
+        // across an .await.
+        let err = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(unlock(Some(d.path()), ClusterArgs { cluster: None }))
             .unwrap_err();
         // "b" was still checked (and is fine); only "a" is reported.
         assert_eq!(err.to_string(), "could not unlock: a");

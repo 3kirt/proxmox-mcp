@@ -1,7 +1,6 @@
 mod client;
 mod commands;
 mod config;
-mod credentials;
 mod tools;
 
 use std::fs::OpenOptions;
