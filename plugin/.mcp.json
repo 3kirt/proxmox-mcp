@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "proxmox": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/proxmox-mcp.sh",
+      "args": [],
+      "env": {
+        "PROXMOX_URL": "${PROXMOX_URL:-}",
+        "PROXMOX_TOKEN": "${PROXMOX_TOKEN:-}",
+        "PROXMOX_INSECURE": "${PROXMOX_INSECURE:-}",
+        "PROXMOX_CLUSTER": "${PROXMOX_CLUSTER:-}"
+      }
+    }
+  }
+}

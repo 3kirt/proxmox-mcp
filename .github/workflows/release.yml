@@ -19,11 +19,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Tag matches Cargo.toml version
+      - name: Tag matches the Cargo.toml and plugin.json versions
         run: |
           version=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
           if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
             echo "tag ${GITHUB_REF_NAME} != Cargo.toml version ${version}"; exit 1
+          fi
+          # The plugin's launcher downloads the release matching this version.
+          plugin=$(jq -r .version plugin/.claude-plugin/plugin.json)
+          if [ "${GITHUB_REF_NAME}" != "v${plugin}" ]; then
+            echo "tag ${GITHUB_REF_NAME} != plugin.json version ${plugin}"; exit 1
           fi
       - name: Tag commit is on main
         run: |

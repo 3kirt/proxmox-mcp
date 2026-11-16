@@ -5,5 +5,5 @@
 
 # Local-only Claude Code + MCP config (may contain credentials)
 .claude/settings.local.json
-.mcp.json
-.mcp.*.json
+/.mcp.json
+/.mcp.*.json

@@ -1242,23 +1242,38 @@ pub mod tests {
         }
     }
 
-    /// Every MCP client config documented in the README must give each
-    /// `${VAR}` in `env` a `:-` default. Claude Code passes a bare `${VAR}`
-    /// through *literally* when the variable is unset (gitlab-mcp v0.39.0
-    /// shipped exactly that bug). The server ignores such values too, but the
-    /// documented configs shouldn't depend on that.
+    /// Every MCP client config we ship (the plugin's `.mcp.json`) or document
+    /// (README examples) must give each `${VAR}` in `env` a `:-` default, and
+    /// that default must be *empty*:
+    /// - Claude Code passes a bare `${VAR}` through literally when the
+    ///   variable is unset (gitlab-mcp v0.39.0 shipped exactly that bug). The
+    ///   server ignores such values too, but the configs shouldn't depend on it.
+    /// - A non-empty default such as `${PROXMOX_URL:-https://pve}` is a real
+    ///   value. It overrides the default cluster's file, so the token would go
+    ///   to the wrong host (gitlab-mcp 7d08066).
     #[test]
-    fn documented_mcp_configs_default_every_placeholder() {
-        let readme =
-            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md")).unwrap();
-        let mut checked = 0;
+    fn shipped_mcp_configs_default_every_placeholder_to_empty() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let plugin = std::fs::read_to_string(format!("{root}/plugin/.mcp.json")).unwrap();
+        let mut configs: Vec<(String, serde_json::Value)> = vec![(
+            "plugin/.mcp.json".into(),
+            serde_json::from_str(&plugin).unwrap(),
+        )];
+        let readme = std::fs::read_to_string(format!("{root}/README.md")).unwrap();
         for (i, block) in readme.split("```json\n").skip(1).enumerate() {
             let body = block.split("```").next().unwrap();
-            if !body.contains("mcpServers") {
-                continue;
+            if body.contains("mcpServers") {
+                let config = serde_json::from_str(body)
+                    .unwrap_or_else(|e| panic!("README json block {i}: {e}"));
+                configs.push((format!("README json block {i}"), config));
             }
-            let config: serde_json::Value =
-                serde_json::from_str(body).unwrap_or_else(|e| panic!("README json block {i}: {e}"));
+        }
+        assert!(
+            configs.len() >= 2,
+            "expected the plugin config and a README example"
+        );
+
+        for (source, config) in &configs {
             for (server, def) in config["mcpServers"].as_object().unwrap() {
                 let Some(env) = def["env"].as_object() else {
                     continue;
@@ -1267,17 +1282,38 @@ pub mod tests {
                     let value = value.as_str().unwrap_or_default();
                     for placeholder in value.split("${").skip(1) {
                         let inner = placeholder.split('}').next().unwrap_or_default();
+                        let default = inner.split_once(":-").map(|(_, d)| d);
                         assert!(
-                            inner.contains(":-"),
-                            "README json block {i}: {server}.env.{key} uses ${{{inner}}} \
-                             without a `:-` default; write ${{{inner}:-}}"
+                            default.is_some(),
+                            "{source}: {server}.env.{key} uses ${{{inner}}} without a `:-` \
+                             default; write ${{{inner}:-}}"
+                        );
+                        assert_eq!(
+                            default,
+                            Some(""),
+                            "{source}: {server}.env.{key} defaults to a real value, which would \
+                             override the cluster file; leave the default empty"
                         );
                     }
                 }
             }
-            checked += 1;
         }
-        assert!(checked >= 1, "expected an mcpServers example in the README");
+    }
+
+    /// The plugin's launcher downloads the release whose version is in
+    /// plugin.json, so it must always match Cargo.toml (release.yml enforces
+    /// the same against the tag).
+    #[test]
+    fn plugin_version_matches_cargo_version() {
+        let plugin: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/plugin/.claude-plugin/plugin.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(plugin["version"], env!("CARGO_PKG_VERSION"));
     }
 
     #[cfg(unix)]

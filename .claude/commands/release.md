@@ -13,10 +13,12 @@ version by incrementing the middle component and resetting the patch to 0
 (e.g. `0.1.0` → `0.2.0`). If the user supplied a version as an argument to this
 command, use that instead.
 
-### 2. Update Cargo.toml
+### 2. Update Cargo.toml and plugin.json
 
-Change the `version` field in `Cargo.toml` to the new version string. (This repo
-has no plugin.json to keep in step.)
+Change the `version` field in `Cargo.toml`, and the `version` in
+`plugin/.claude-plugin/plugin.json`, to the new version string. The plugin's
+launcher downloads the release matching plugin.json's version, and the release
+workflow refuses a tag that doesn't match both.
 
 ### 3. Update Cargo.lock
 
@@ -107,7 +109,7 @@ scripts/changelog-section.sh <new version>
 ### 9. Commit the version bump and changelog
 
 ```
-git add Cargo.toml Cargo.lock CHANGELOG.md
+git add Cargo.toml Cargo.lock CHANGELOG.md plugin/.claude-plugin/plugin.json
 git commit -m "Bump version to <new version>"
 ```
 
@@ -153,7 +155,12 @@ git push origin main v<new version>
 
 4. `chmod +x` it and run `make smoke BIN=<downloaded asset>`.
 
-5. Make one real read-only tool call against the user's configured cluster.
+5. Check that the plugin launcher installs the new release. Use a throwaway cache
+   in the scratchpad: `XDG_CACHE_HOME=<scratch> plugin/bin/proxmox-mcp.sh --version`
+   must download, verify and print the new version. Then run
+   `make smoke BIN=plugin/bin/proxmox-mcp.sh` with the same `XDG_CACHE_HOME`.
+
+6. Make one real read-only tool call against the user's configured cluster.
    Either call `proxmox_version_get` over stdio with the downloaded binary,
    using the user's default config directory, or ask the user to make it through
    their MCP client. If the cluster token is pass-backed and locked, ask the user
