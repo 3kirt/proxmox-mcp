@@ -89,6 +89,30 @@ The full Proxmox API schema is at `~/source/repos/pve-docs/api-viewer/apidata.js
 (PNG), `*/vncwebsocket`/`mtunnelwebsocket` (websockets), and `qemu/*/agent/*`
 (executes guest-agent commands) from the read-only set.
 
+## Claude Code plugin
+
+The repo is its own marketplace (`.claude-plugin/marketplace.json`, with one
+plugin at `./plugin`).
+- `plugin/bin/proxmox-mcp.sh` is a bootstrap launcher. It downloads the release
+  asset `proxmox-mcp-{darwin,linux}-{arm64,amd64}` for `plugin.json`'s version,
+  verifies it against `checksums.txt`, caches it under
+  `${XDG_CACHE_HOME:-~/.cache}/proxmox-mcp/v<version>/`, and execs it, forwarding
+  its arguments. A download or platform failure falls back to `proxmox-mcp` on
+  `PATH`; a checksum mismatch is fatal.
+- **Invariants:**
+  - `plugin/.claude-plugin/plugin.json`'s version equals Cargo.toml's. Checked by
+    the `plugin_version_matches_cargo_version` test and by release.yml's verify
+    job against the tag.
+  - release.yml's artifact names must match the launcher's platform table.
+  - Every `${VAR}` in `plugin/.mcp.json` (and README examples) is `${VAR:-}`,
+    with an *empty* default. A bare `${VAR}` arrives literally when unset, and
+    a non-empty default overrides the cluster files.
+    `shipped_mcp_configs_default_every_placeholder_to_empty` enforces this.
+  - The launcher writes only to stderr, because stdout is the MCP transport.
+    It must stay bash 3.2-safe for macOS: save `"$@"` at the top, since inside
+    a function it means the function's arguments. `make lint` shellchecks it.
+- Validate with `claude plugin validate .` and `claude plugin validate ./plugin`.
+
 ## Pass-backed tokens
 
 - **Lazy auth:** a `Credential::Pass` client decrypts on the first request under a

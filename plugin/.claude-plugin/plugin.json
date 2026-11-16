@@ -1,0 +1,12 @@
+{
+  "name": "proxmox-mcp",
+  "version": "0.17.0",
+  "description": "Read-only Proxmox VE MCP server: cluster inventory, nodes, guests (QEMU), storage, tasks, backups, HA and disks, across one or more clusters. Tokens can be stored GPG-encrypted.",
+  "author": {
+    "name": "Kirtis Bakalarczyk"
+  },
+  "homepage": "https://github.com/3kirt/proxmox-mcp",
+  "repository": "https://github.com/3kirt/proxmox-mcp",
+  "license": "GPL-3.0",
+  "keywords": ["proxmox", "pve", "mcp", "virtualization", "read-only"]
+}

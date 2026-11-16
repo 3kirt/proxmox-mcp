@@ -1,0 +1,16 @@
+{
+  "name": "proxmox-mcp",
+  "metadata": {
+    "description": "Marketplace for the proxmox-mcp Claude Code plugin: a read-only Proxmox VE MCP server."
+  },
+  "owner": {
+    "name": "Kirtis Bakalarczyk"
+  },
+  "plugins": [
+    {
+      "name": "proxmox-mcp",
+      "source": "./plugin",
+      "description": "Read-only Proxmox VE MCP server: cluster inventory, nodes, guests, storage, tasks, backups, HA and disks, across one or more clusters."
+    }
+  ]
+}

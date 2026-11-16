@@ -191,13 +191,24 @@ async fn call_through_binary(proxmox: &FakeProxmox, token_env: TokenEnv) -> Valu
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    match token_env {
-        TokenEnv::Unset => {}
-        TokenEnv::Empty => {
-            cmd.env("PROXMOX_TOKEN", "");
-        }
-        TokenEnv::LiteralPlaceholder => {
-            cmd.env("PROXMOX_TOKEN", "${PROXMOX_TOKEN}");
+    // Every variable the plugin's .mcp.json passes, the way the client hands
+    // it over. Any of them taking effect would break the call: a URL or
+    // cluster override points away from the stand-in, and a token override
+    // sends the wrong credential.
+    for var in [
+        "PROXMOX_URL",
+        "PROXMOX_TOKEN",
+        "PROXMOX_INSECURE",
+        "PROXMOX_CLUSTER",
+    ] {
+        match token_env {
+            TokenEnv::Unset => {}
+            TokenEnv::Empty => {
+                cmd.env(var, "");
+            }
+            TokenEnv::LiteralPlaceholder => {
+                cmd.env(var, format!("${{{var}}}"));
+            }
         }
     }
     let mut child = cmd.spawn().expect("spawn proxmox-mcp");

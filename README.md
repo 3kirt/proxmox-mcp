@@ -9,6 +9,40 @@ Only `GET` endpoints are wrapped — the server cannot start, stop, create, or
 delete anything. For defence in depth, give the API token the **`PVEAuditor`**
 role so read-only is enforced server-side as well.
 
+## Plugin install (recommended)
+
+In Claude Code, this repo is its own plugin marketplace. In Claude Code 2.1.275
+or later, install in one step:
+
+```
+/plugin install proxmox-mcp --marketplace 3kirt/proxmox-mcp
+```
+
+On older versions, add the marketplace first:
+
+```
+/plugin marketplace add 3kirt/proxmox-mcp
+/plugin install proxmox-mcp@proxmox-mcp
+```
+
+The plugin's launcher downloads the release binary matching the plugin version
+for your platform (linux or macOS, amd64 or arm64), and checks its SHA-256
+against the release's `checksums.txt`. It caches the binary under
+`~/.cache/proxmox-mcp/v<version>/`, or `$XDG_CACHE_HOME` if set. A plugin
+update fetches the matching new binary. If there's no download for your
+platform, or the download fails, it falls back to a `proxmox-mcp` on your
+`PATH`. A checksum mismatch always stops it.
+
+The plugin then reads your clusters the same way the server always does, from
+`~/.config/proxmox-mcp/clusters/` (see [Configuration](#configuration)). It
+also passes through `PROXMOX_URL`, `PROXMOX_TOKEN`, `PROXMOX_INSECURE` and
+`PROXMOX_CLUSTER` if they're exported in the environment Claude Code was
+started from. When they aren't, they arrive empty and are ignored, so the
+cluster files apply. For GPG-encrypted tokens, run `proxmox-mcp login`
+once from a terminal: the plugin's binary lives in the cache, so for that
+step install one with `cargo install --git https://github.com/3kirt/proxmox-mcp`,
+or run the cached binary directly.
+
 ## Configuration
 
 Each Proxmox cluster gets its own JSON file in a config directory, much like a

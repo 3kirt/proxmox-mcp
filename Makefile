@@ -27,6 +27,7 @@ test-real-gpg:
 lint: secrets-scan
 	cargo clippy --all-targets --locked -- -D warnings
 	cargo fmt --check
+	shellcheck plugin/bin/*.sh
 
 secrets-scan:
 	@if git grep --untracked -nE '$(SECRET_PATTERN)' -- . ':!Cargo.lock'; then \

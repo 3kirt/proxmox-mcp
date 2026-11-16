@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- A Claude Code plugin, with the repo as its own marketplace:
+  `/plugin install proxmox-mcp --marketplace 3kirt/proxmox-mcp`.
+  - Its launcher downloads the release binary matching the plugin version,
+    verifies it against `checksums.txt`, and caches it under
+    `~/.cache/proxmox-mcp/`. It falls back to a `proxmox-mcp` on `PATH` when
+    there's no download.
+  - The plugin's `PROXMOX_*` env entries all default to empty, so unset
+    variables never override the cluster files.
+- Releases check that `plugin.json`'s version matches the tag.
+
 ## [0.17.0] - 2026-11-14
 
 Fixes from a second review of the GPG token code: unlock advice that names the
