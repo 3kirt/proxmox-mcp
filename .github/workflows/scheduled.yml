@@ -1,7 +1,8 @@
 name: Scheduled
 
 # Weekly checks for things that break without a code change: new RustSec
-# advisories, new compiler/clippy releases, and gpg status-code drift.
+# advisories and new compiler/clippy releases. (gpg status-code drift is
+# checked by pass-store's own scheduled CI.)
 # A failure opens (or comments on) a "Scheduled CI failing" issue.
 # There is no live suite: Proxmox can't realistically run on a hosted runner.
 
@@ -55,26 +56,9 @@ jobs:
       - run: make lint
       - run: make test
 
-  real-gpg:
-    name: Real gpg (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install GnuPG (macOS)
-        if: runner.os == 'macOS'
-        run: brew install gnupg
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: gpg --version
-      - run: make test-real-gpg
-
   notify:
     name: Report failure
-    needs: [deny, msrv, toolchain-drift, real-gpg]
+    needs: [deny, msrv, toolchain-drift]
     if: failure()
     runs-on: ubuntu-latest
     permissions:

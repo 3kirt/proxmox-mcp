@@ -23,6 +23,8 @@ deny = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# pass-store, which ships from GitHub tags only (never crates.io).
+allow-git = ["https://github.com/3kirt/pass-store"]
 
 [licenses]
 # Only GPL-3.0-compatible licenses that the tree actually needs. Crates
@@ -35,6 +37,8 @@ allow = [
     "BSD-3-Clause",
     "Unicode-3.0",
     "CDLA-Permissive-2.0",
+    # pass-store (GPL-3.0-or-later, usable under GPL-3.0).
+    "GPL-3.0-or-later",
     # This crate itself.
     "GPL-3.0-only",
 ]

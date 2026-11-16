@@ -4,7 +4,7 @@
 //! marked `"default": true` serves tool calls that omit `cluster`.
 //!
 //! A cluster's token is either plaintext (`"token"`) or GPG-encrypted in a
-//! `pass`-compatible store (`"pass_entry"`, see [`crate::credentials`]).
+//! `pass`-compatible store (`"pass_entry"`, see the pass-store crate).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, anyhow, bail};
 use serde::Deserialize;
 
-use crate::credentials::{PassEntry, PassStore, StoreLocation};
+use pass_store::{Branding, PassEntry, PassStore, StoreLocation};
 
 /// Name of the cluster defined by env vars alone (no cluster files), unless
 /// `PROXMOX_CLUSTER` names it.
@@ -87,13 +87,24 @@ impl ClusterFile {
     /// `config_dir` is a non-default `--config-dir`, named in the store's
     /// unlock/login advice.
     fn pass_store(&self, config_dir: Option<&Path>) -> anyhow::Result<PassStore> {
-        Ok(PassStore::resolve(&StoreLocation {
-            gpg: self.gpg.as_deref(),
-            store_dir: self.password_store_dir.as_deref(),
-            gnupg_home: self.gnupg_home.as_deref(),
-        })?
-        .with_config_dir(config_dir.map(Path::to_path_buf)))
+        Ok(PassStore::resolve(
+            &StoreLocation {
+                gpg: self.gpg.as_deref(),
+                store_dir: self.password_store_dir.as_deref(),
+                gnupg_home: self.gnupg_home.as_deref(),
+            },
+            branding(config_dir),
+        )?)
     }
+}
+
+/// How pass-store names this app in its unlock/login advice: `config_dir`
+/// is a non-default `--config-dir`, so the advice reaches the same files.
+pub fn branding(config_dir: Option<&Path>) -> Branding {
+    Branding::new(
+        "Proxmox",
+        Branding::cli_prefix("proxmox-mcp", "--config-dir", config_dir),
+    )
 }
 
 /// Where a cluster's API token comes from.
@@ -453,48 +464,12 @@ fn apply_env(cluster: &mut ClusterFile) {
     }
 }
 
-/// The one "is this value set?" rule for every env var and config value:
-/// blank counts as unset, and so does an unexpanded `${VAR}` placeholder.
-/// MCP clients substitute `${PROXMOX_TOKEN}` in a shared config from the
-/// user's environment, and when the variable isn't exported Claude Code
-/// passes the placeholder through *literally*. Taking that as a real token
-/// would shadow a `pass_entry` (or the cluster file's token) and fail every
-/// call with a 401; treating it as unset falls through to the cluster file,
-/// as an empty value does.
-fn non_blank(v: Option<String>) -> Option<String> {
-    v.filter(|s| !is_unset_value(s))
-}
-
-fn is_unset_value(s: &str) -> bool {
-    let t = s.trim();
-    t.is_empty() || is_unexpanded_placeholder(t)
-}
-
-/// `${NAME}` or `${NAME:-…}` exactly, as left behind by a client that didn't
-/// substitute it. No real token or URL has this shape.
-fn is_unexpanded_placeholder(t: &str) -> bool {
-    t.strip_prefix("${")
-        .and_then(|rest| rest.strip_suffix('}'))
-        .is_some_and(|inner| {
-            let name = inner.split_once(":-").map_or(inner, |(n, _)| n);
-            !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-        })
-}
-
-/// An environment variable, treating blank values and unexpanded `${…}`
-/// placeholders as unset (see [`non_blank`]).
-pub fn env_var(name: &str) -> Option<String> {
-    let raw = std::env::var(name).ok()?;
-    if is_unexpanded_placeholder(raw.trim()) {
-        tracing::warn!(
-            variable = name,
-            "ignoring unexpanded placeholder (the MCP client did not substitute it; \
-             the variable is not set in its environment)"
-        );
-        return None;
-    }
-    non_blank(Some(raw))
-}
+#[cfg(test)]
+use pass_store::is_unexpanded_placeholder;
+/// The one "is this value set?" rule for every env var and config value
+/// (blank or an unexpanded `${VAR}` placeholder counts as unset), shared
+/// with gitlab-mcp and netbox-mcp through pass-store.
+pub use pass_store::{env_var, non_blank};
 
 fn resolve_cluster(
     raw: &ClusterFile,
@@ -581,10 +556,7 @@ pub fn parse_bool(v: &str) -> bool {
 }
 
 pub fn home_dir() -> anyhow::Result<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .context("cannot determine home directory")
+    Ok(pass_store::home_dir()?)
 }
 
 /// `$XDG_CONFIG_HOME/proxmox-mcp/clusters`, falling back to
@@ -613,7 +585,7 @@ pub fn update_cluster_file(
         std::fs::canonicalize(path).with_context(|| format!("resolving {}", path.display()))?
     } else {
         if let Some(dir) = path.parent() {
-            crate::credentials::create_private_dir(dir)?;
+            pass_store::create_private_dir(dir)?;
         }
         path.to_path_buf()
     };
@@ -637,7 +609,7 @@ pub fn update_cluster_file(
     // Claim the predictable temp path exclusively, so a planted file or
     // symlink there fails the write instead of being followed. On that
     // failure nothing is deleted: whatever is there isn't ours.
-    let mut file = crate::credentials::create_private_file(&tmp)
+    let mut file = pass_store::create_private_file(&tmp)
         .with_context(|| format!("writing cluster file {}", target.display()))?;
     let write = || -> anyhow::Result<()> {
         let mut body = serde_json::to_string_pretty(&serde_json::Value::Object(obj))?;
@@ -672,9 +644,9 @@ pub fn check_writable(path: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    crate::credentials::create_private_dir(dir)?;
+    pass_store::create_private_dir(dir)?;
     let probe = dir.join(format!(".write-probe{}", std::process::id()));
-    crate::credentials::create_private_file(&probe)
+    pass_store::create_private_file(&probe)
         .map(drop)
         .with_context(|| format!("config directory {} is not writable", dir.display()))?;
     let _ = std::fs::remove_file(&probe);
@@ -710,20 +682,14 @@ fn enforce_https(url: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 pub mod tests {
-    use std::sync::{Mutex, MutexGuard};
-
     use super::*;
 
     // Cargo runs unit tests on multiple threads in one process. Tests that touch
-    // PROXMOX_* env vars must serialize, or one test's set_var leaks into
-    // another's resolve(). Hold this guard for the whole test body.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    pub fn lock_env() -> MutexGuard<'static, ()> {
-        ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
+    // env vars must serialize, or one test's set_var leaks into another's
+    // resolve(). This is pass-store's lock, not one of our own, so these tests
+    // also serialize against pass-store's env reads (GNUPGHOME, HOME,
+    // PASSWORD_STORE_DIR). Hold this guard for the whole test body.
+    pub use pass_store::test_support::lock_env;
 
     const ENV_VARS: [&str; 4] = [
         "PROXMOX_URL",
@@ -733,7 +699,7 @@ pub mod tests {
     ];
 
     fn clear_env() {
-        // SAFETY: callers hold ENV_LOCK, serializing all env access in this module.
+        // SAFETY: callers hold lock_env(), serializing all env access in the test binary.
         unsafe {
             for var in ENV_VARS {
                 std::env::remove_var(var);
@@ -741,9 +707,9 @@ pub mod tests {
         }
     }
 
-    /// Set env vars for the rest of the test. Callers hold ENV_LOCK.
+    /// Set env vars for the rest of the test. Callers hold lock_env().
     fn set_env(vars: &[(&str, &str)]) {
-        // SAFETY: callers hold ENV_LOCK, serializing all env access in this module.
+        // SAFETY: callers hold lock_env(), serializing all env access in the test binary.
         unsafe {
             for (k, v) in vars {
                 std::env::set_var(k, v);
@@ -772,7 +738,7 @@ pub mod tests {
         Config::load(Some(dir.path()))
     }
 
-    /// Load + resolve with PROXMOX_* cleared. Callers must hold ENV_LOCK.
+    /// Load + resolve with PROXMOX_* cleared. Callers must hold lock_env().
     fn resolve(files: &[(&str, &str)]) -> anyhow::Result<Clusters> {
         clear_env();
         load(files)?.resolve()
@@ -1055,7 +1021,7 @@ pub mod tests {
         // A relative XDG_CONFIG_HOME is ignored per the XDG spec.
         set_env(&[("XDG_CONFIG_HOME", "relative")]);
         let relative = default_config_dir().unwrap();
-        // SAFETY: ENV_LOCK serializes all env-touching tests in this module.
+        // SAFETY: lock_env() serializes all env-touching tests.
         unsafe {
             match saved {
                 Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),

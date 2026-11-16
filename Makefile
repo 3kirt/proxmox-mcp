@@ -9,7 +9,7 @@ MSRV := $(shell sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml)
 # non-UUID secrets, and docs use the xxxxxxxx-xxxx-… placeholder.
 SECRET_PATTERN := ![A-Za-z0-9_.-]+=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 
-.PHONY: build release test test-real-gpg lint secrets-scan fmt fmt-check deny msrv smoke check install clean
+.PHONY: build release test lint secrets-scan fmt fmt-check deny msrv smoke check install clean
 
 build:
 	cargo build --locked
@@ -19,10 +19,6 @@ release:
 
 test:
 	cargo test --all --locked
-
-# Classification against the real gpg (generates throwaway keys).
-test-real-gpg:
-	REAL_GPG=1 cargo test --locked real_gpg -- --ignored
 
 lint: secrets-scan
 	cargo clippy --all-targets --locked -- -D warnings

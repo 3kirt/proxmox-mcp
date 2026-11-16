@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The pass/GPG credential store now comes from the shared
+  [pass-store](https://github.com/3kirt/pass-store) crate (v0.1.0, pinned by
+  git tag), replacing the in-tree `src/credentials/` module. Behavior is
+  unchanged apart from fixes made in the crate:
+  - `unlock` reports a missing entry before running gpg.
+  - `login` refuses to encrypt to an empty recipient list.
+  - A `~` in `GNUPGHOME` is expanded, and an empty `HOME` is treated as unset.
+- The real-gpg classification suite moved with the code; it runs in
+  pass-store's CI, so `make test-real-gpg` and its CI jobs are gone.
+
 ## [0.18.0] - 2026-11-15
 
 A Claude Code plugin with the repo as its own marketplace, and a docs review.

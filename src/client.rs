@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use reqwest::{Client, StatusCode, header};
 use serde_json::Value;
@@ -7,7 +7,7 @@ use thiserror::Error;
 use tracing::{debug, trace};
 
 use crate::config::{Connection, Credential};
-use crate::credentials::PassEntry;
+use pass_store::LazyToken;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -69,85 +69,10 @@ pub struct ProxmoxClient {
 enum Auth {
     /// Known up front; baked into the client's default headers.
     Static,
-    /// Decrypted from a pass entry on first use and added per request.
-    Pass(Arc<PassToken>),
-}
-
-/// A token decrypted from a `pass` entry on demand. Failures are *not*
-/// cached: while the GPG key is locked every request fails fast with a
-/// [`ProxmoxError::Credentials`] explaining how to unlock, and the first
-/// request after the user unlocks succeeds — no server restart. Once
-/// decrypted the token is held in memory, so gpg-agent's cache TTL no longer
-/// matters for this process.
-struct PassToken {
-    entry: PassEntry,
-    // Held across the decrypt so concurrent requests run gpg once, not N times.
-    state: tokio::sync::Mutex<TokenState>,
-}
-
-#[derive(Default)]
-struct TokenState {
-    value: Option<header::HeaderValue>,
-    /// Proxmox rejected `value` (401): re-read the entry before the next
-    /// request, in case the token was rotated with `proxmox-mcp login`.
-    stale: bool,
-    /// A re-read after a 401 failed: don't run gpg again before this, so a
-    /// revoked token with a locked key doesn't put a decrypt in front of
-    /// every request.
-    retry_at: Option<Instant>,
-}
-
-/// How long to keep reusing a rejected token after re-reading it failed.
-const REREAD_BACKOFF: Duration = Duration::from_secs(30);
-
-impl PassToken {
-    async fn header(&self) -> Result<header::HeaderValue, ProxmoxError> {
-        let mut state = self.state.lock().await;
-        if let Some(value) = state.value.as_ref()
-            && (!state.stale || state.retry_at.is_some_and(|t| Instant::now() < t))
-        {
-            return Ok(value.clone());
-        }
-        let read = self.entry.read_token().await;
-        let result = match (read, state.value.as_ref()) {
-            (Ok(token), _) => {
-                let value = auth_header(&token).map_err(|e| {
-                    ProxmoxError::Credentials(format!(
-                        "{e} (from pass entry {})",
-                        self.entry.name()
-                    ))
-                })?;
-                debug!(target: LOG_TARGET, entry = self.entry.name(), "decrypted Proxmox token from pass");
-                state.value = Some(value.clone());
-                state.stale = false;
-                state.retry_at = None;
-                Ok(value)
-            }
-            // The re-read after a 401 failed (typically: gpg-agent's cache has
-            // expired since the first decrypt). Keep sending the rejected
-            // token so the caller sees Proxmox's real auth error rather than a
-            // misleading "locked"; the re-read is retried on the next request.
-            (Err(e), Some(old)) => {
-                debug!(target: LOG_TARGET, error = %e, "re-reading rejected token failed; reusing it");
-                let old = old.clone();
-                state.retry_at = Some(Instant::now() + REREAD_BACKOFF);
-                Ok(old)
-            }
-            (Err(e), None) => Err(ProxmoxError::Credentials(e.to_string())),
-        };
-        drop(state);
-        result
-    }
-
-    /// Proxmox answered 401 to a request sent with `used`. Mark the token for
-    /// re-reading — but only if it's still the current one, so a 401 for an
-    /// already-replaced token can't discard its fresh successor.
-    async fn mark_rejected(&self, used: &header::HeaderValue) {
-        let mut state = self.state.lock().await;
-        if state.value.as_ref() == Some(used) {
-            state.stale = true;
-        }
-    }
+    /// Decrypted from a pass entry on first use and added per request (see
+    /// [`LazyToken`]: failures aren't cached, so the first request after the
+    /// user unlocks succeeds with no restart, and a 401 re-reads the entry).
+    Pass(Arc<LazyToken>),
 }
 
 /// Build the sensitive `Authorization` header value for a full API token.
@@ -174,7 +99,7 @@ pub fn install_crypto_provider() {
 
 impl ProxmoxClient {
     /// A client for `conn`. A pass-entry token is decrypted on the first
-    /// request (see [`PassToken`]), so the server starts even while the GPG
+    /// request (see [`LazyToken`]), so the server starts even while the GPG
     /// key is locked.
     pub fn new(conn: Connection) -> anyhow::Result<Self> {
         let Connection {
@@ -189,10 +114,12 @@ impl ProxmoxClient {
                 headers.insert(header::AUTHORIZATION, auth_header(&token)?);
                 Auth::Static
             }
-            Credential::Pass(entry) => Auth::Pass(Arc::new(PassToken {
+            // Proxmox uses "PVEAPIToken=USER@REALM!TOKENID=UUID", not "Bearer".
+            Credential::Pass(entry) => Auth::Pass(Arc::new(LazyToken::new(
                 entry,
-                state: tokio::sync::Mutex::new(TokenState::default()),
-            })),
+                header::AUTHORIZATION,
+                |token| format!("PVEAPIToken={token}"),
+            ))),
         };
 
         let http = Client::builder()
@@ -258,34 +185,39 @@ impl ProxmoxClient {
         let Auth::Pass(token) = &self.auth else {
             return Ok(builder.send().await?);
         };
-        let sent = token.header().await?;
+        let sent = token.value().await.map_err(credentials)?;
         let retry = builder.try_clone();
         let resp = builder
             .header(header::AUTHORIZATION, sent.clone())
             .send()
             .await?;
-        if resp.status() != StatusCode::UNAUTHORIZED {
+        // On a 401, re-reads the entry (or, inside the re-read backoff,
+        // keeps `sent`); a different token means it was rotated.
+        let Some(fresh) = token
+            .retry_value(resp.status(), &sent)
+            .await
+            .map_err(credentials)?
+        else {
             return Ok(resp);
-        }
-        token.mark_rejected(&sent).await;
+        };
         let Some(retry) = retry else {
             return Ok(resp);
         };
-        // Re-reads the entry (or, inside the re-read backoff, returns `sent`).
-        let fresh = token.header().await?;
-        if fresh == sent {
-            return Ok(resp);
-        }
         debug!(target: LOG_TARGET, "Proxmox rejected the token; retrying with the re-read one");
         let resp = retry
             .header(header::AUTHORIZATION, fresh.clone())
             .send()
             .await?;
-        if resp.status() == StatusCode::UNAUTHORIZED {
+        if token.is_rejection(resp.status()) {
             token.mark_rejected(&fresh).await;
         }
         Ok(resp)
     }
+}
+
+#[allow(clippy::needless_pass_by_value)] // used as a map_err fn
+fn credentials(e: pass_store::TokenError) -> ProxmoxError {
+    ProxmoxError::Credentials(e.to_string())
 }
 
 async fn handle_response(resp: reqwest::Response) -> Result<Value, ProxmoxError> {
@@ -537,8 +469,8 @@ mod tests {
 
     mod pass_auth {
         use super::*;
-        use crate::credentials::PassStore;
-        use crate::credentials::test_support::{LOCKED_SNIPPET, fake_gpg, ok_snippet};
+        use pass_store::PassStore;
+        use pass_store::test_support::{LOCKED_SNIPPET, fake_gpg, ok_snippet};
 
         const OLD: &str = "root@pam!mcp=old-secret";
         const NEW: &str = "root@pam!mcp=rotated-secret";
@@ -547,7 +479,9 @@ mod tests {
             server: &MockServer,
         ) -> (tempfile::TempDir, std::path::PathBuf, ProxmoxClient) {
             let dir = tempfile::tempdir().unwrap();
-            let entry = PassStore::new(dir.path(), fake_gpg()).entry("t").unwrap();
+            let entry = PassStore::new(dir.path(), fake_gpg(), crate::config::branding(None))
+                .entry("t")
+                .unwrap();
             let file = entry.path();
             let client = ProxmoxClient::new(Connection {
                 url: server.uri(),
