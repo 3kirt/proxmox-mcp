@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-15
+
+A Claude Code plugin with the repo as its own marketplace, and a docs review.
+
 ### Added
 - A Claude Code plugin, with the repo as its own marketplace:
   `/plugin install proxmox-mcp --marketplace 3kirt/proxmox-mcp`.
@@ -21,7 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 - README: the build commands match the Makefile (`make release`, `make check`),
   the rotation retry and `status` notes are accurate, and the plugin's `login`
-  note is clearer. `CLAUDE.md` describes the current pass-auth behaviour and
+  note is clearer. The CLI help no longer says to set `"gpg"` by hand, since
+  `login` records it. `CLAUDE.md` describes the current pass-auth behaviour and
   tests.
 
 ### Internal
