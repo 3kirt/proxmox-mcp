@@ -67,7 +67,7 @@ and commit that separately before continuing.
 make check
 ```
 
-This runs fmt-check, lint (secrets scan, clippy, fmt), test, deny, the release
+This runs fmt-check, lint (secrets scan, clippy, fmt, shellcheck), test, deny, the release
 build, and `make smoke` against the release binary. If anything fails, stop and
 report the error; do not proceed to tagging. If only formatting fails, run
 `make fmt` and re-run `make check`.

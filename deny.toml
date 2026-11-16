@@ -4,7 +4,8 @@
 all-features = true
 
 [advisories]
-# Vulnerabilities fail; unmaintained/unsound notices are reported.
+# Vulnerability advisories fail. Unmaintained advisories fail only for direct
+# dependencies; transitive ones aren't actionable here, so they're ignored.
 unmaintained = "workspace"
 yanked = "deny"
 

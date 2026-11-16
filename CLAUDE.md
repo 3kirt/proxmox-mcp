@@ -8,13 +8,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 make check          # pre-release gate: fmt-check lint test deny release smoke
 make build          # cargo build (debug); `make release` for the release build
 make test           # cargo test --all (includes tests/launch_path.rs)
-make lint           # secrets-scan + clippy --all-targets -D warnings + fmt --check
+make lint           # secrets-scan + clippy --all-targets -D warnings + fmt --check + shellcheck
 make fmt            # cargo fmt
 make deny           # cargo deny check (advisories, bans, sources, licenses)
 make msrv           # cargo +<rust-version> test --all
 make smoke          # scripts/smoke.py against BIN (default target/release/proxmox-mcp)
 make test-real-gpg  # REAL_GPG=1: classification against the real gpg (makes throwaway keys)
-make install        # cargo install --path . (installs to ~/.cargo/bin)
+make install        # cargo install --locked --path . (installs to ~/.cargo/bin)
 
 cargo test <test_name>   # run a single test
 ```
@@ -64,7 +64,7 @@ src/
   tools/
     mod.rs         — ProxmoxMcpServer (one client per cluster), scoped()/any_scoped() call helpers, #[tool] shims, ServerHandler
     params.rs      — string_param! types (NodeId, Upid, ClusterId…), Scoped<P>/AnyScoped<P> cluster wrappers, QueryBuilder, encode_seg()
-    slim.rs        — slim_value(): drops null fields recursively
+    slim.rs        — slim_value() drops null fields recursively; humanize_value() adds `<key>_iso` next to epoch fields
     cluster.rs     — cluster-scoped domain fns + param structs
     nodes.rs       — node/qemu/storage/disk/task domain fns + param structs
 ```
@@ -116,33 +116,49 @@ plugin at `./plugin`).
 ## Pass-backed tokens
 
 - **Lazy auth:** a `Credential::Pass` client decrypts on the first request under a
-  mutex, caches only success, and marks the token stale on a 401 (re-reading the
-  entry next time, but reusing the old token if that re-read fails so the caller
-  sees the real 401). Never add a startup-time decrypt or token check: the server
-  must start while the key is locked. Decrypt failures are
-  `ProxmoxError::Credentials`; fan-out reports them under `unreachable`.
+  mutex and caches only success. On a 401 (only 401: Proxmox answers a bad token
+  with 401 and a permission denial with 403), `send()` marks the token stale,
+  re-reads the entry at once, and retries the request once if the token changed.
+  If the re-read fails, it reuses the old token, so the caller sees the real 401
+  rather than "locked", and doesn't run gpg again for 30s (`REREAD_BACKOFF`).
+  Never add a startup-time decrypt or token check: the server must start while
+  the key is locked. Decrypt failures are `ProxmoxError::Credentials`; fan-out
+  reports them under `unreachable`.
 - **Never prompt** in the server path and never match gpg's localized text:
   classify by the numeric `[GNUPG:] ERROR` codes (low 16 bits: 85/99 locked, 17 no
   secret key), and require `DECRYPTION_OKAY` for success.
+- User-facing advice ("run `proxmox-mcp unlock`") comes from `PassStore::cli()`,
+  which adds `--config-dir` when the server was started with one, and from a
+  shell-quoted `gpg --homedir … --decrypt` command.
+- Files the store or `login` write (`.gpg-id`, entries, cluster files) are 0600
+  in 0700 directories. Temp files are claimed with `create_new`, and only
+  deleted when this call created them.
 - `unlock`/`status` use the cluster file's `pass_entry` directly
   (`Config::configured_pass_entry`), not the resolved credential, so an exported
   `PROXMOX_TOKEN` can't hide the entry the server uses.
 
 ## Testing
 
-Unit tests live beside the code: `config.rs` (loading, clusters, env override,
-HTTPS, pass_entry, `${VAR}` placeholders, a lint of the README's MCP configs),
-`credentials/` (one shared fake `gpg` script in `test_support` that *sources* the
-entry file, so each test's "ciphertext" is a shell snippet emitting canned
-`[GNUPG:]` status lines), `commands.rs` (entry naming, token parsing), `client.rs` (envelope handling, error truncation), `tools/slim.rs`,
-`tools/params.rs` (`encode_seg`, `QueryBuilder`, UPID parsing), and
-`tools/mod.rs` (tool schemas, domain fns and tool calls against a `wiremock`
-Proxmox). In `mod.rs` tests, use `mount_data`/`mount_failure` for mocks and
+Unit tests live beside the code:
+- `config.rs`: loading, clusters, env override, HTTPS, pass_entry, `${VAR}`
+  placeholders, a lint of the plugin's and README's MCP configs, and the
+  plugin.json version.
+- `credentials/`: one shared fake `gpg` script in `test_support` that *sources*
+  the entry file, so each test's "ciphertext" is a shell snippet emitting canned
+  `[GNUPG:]` status lines. `agent.rs` tests the Assuan exchange over an
+  in-memory duplex. `real_gpg.rs` is the opt-in check against the real gpg
+  (`make test-real-gpg`).
+- `commands.rs`: entry naming, token parsing, skipped files, `unlock` carrying on.
+- `client.rs`: envelope handling, error truncation, and lazy pass auth (locked
+  then unlocked, rotation retry, backoff, one decrypt for concurrent calls).
+- `tools/slim.rs`; `tools/params.rs` (`encode_seg`, `QueryBuilder`, UPID
+  parsing); `tools/mod.rs` (tool schemas and count, domain fns and tool calls
+  against a `wiremock` Proxmox). In `mod.rs` tests, use `mount_data`/`mount_failure` for mocks and
 build params from JSON with `params(json!(..))` / `args(json!(..))`.
 
 `tests/launch_path.rs` spawns the built binary over MCP stdio with a pass-entry
 cluster file, a fake `gpg`, and a small self-signed HTTPS stand-in for Proxmox
-(the server refuses plain HTTP, so wiremock can't be used there). It asserts the
-pass token is sent when `PROXMOX_TOKEN` is unset, empty, or a literal
-`${PROXMOX_TOKEN}`. Tests that touch `PROXMOX_*` env vars hold
+(the server refuses plain HTTP, so wiremock can't be used there). It passes every
+`PROXMOX_*` variable the plugin sets, unset, empty or as a literal `${VAR}`, and
+asserts the cluster file's URL and pass token are what reach Proxmox. Tests that touch `PROXMOX_*` env vars hold
 `config::tests::lock_env()`.

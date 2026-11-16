@@ -1189,8 +1189,6 @@ pub mod tests {
     }
 
     #[test]
-    // `${X}` etc. are shell-style placeholders under test, not format args.
-    #[allow(clippy::literal_string_with_formatting_args)]
     fn placeholder_env_vars_fall_back_to_the_cluster_file() {
         let _guard = lock_env();
         clear_env();
@@ -1209,7 +1207,6 @@ pub mod tests {
     }
 
     #[test]
-    #[allow(clippy::literal_string_with_formatting_args)]
     fn placeholder_in_a_cluster_file_counts_as_unset() {
         let _guard = lock_env();
         let file =
@@ -1219,7 +1216,10 @@ pub mod tests {
     }
 
     #[test]
-    #[allow(clippy::literal_string_with_formatting_args)]
+    #[expect(
+        clippy::literal_string_with_formatting_args,
+        reason = "shell-style ${VAR} placeholders under test, not format args"
+    )]
     fn unexpanded_placeholders_are_recognised() {
         for p in [
             "${PROXMOX_TOKEN}",

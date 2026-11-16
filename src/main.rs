@@ -41,8 +41,8 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
         it with gpg, and writes NAME.json. The server decrypts it on first use without ever \
         prompting: if gpg-agent has not cached the passphrase, tool calls fail with a message \
         asking you to run `proxmox-mcp unlock`, and succeed once you have. `proxmox-mcp status` \
-        shows each cluster's token source and lock state. Set \"gpg\" in the cluster file to \
-        the full path of gpg if your MCP client launches servers with a minimal PATH.\n\
+        shows each cluster's token source and lock state. login records the full path of gpg \
+        in the cluster file, for MCP clients that launch servers with a minimal PATH.\n\
         \n\
         DEBUGGING\n\
         \n\

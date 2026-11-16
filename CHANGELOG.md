@@ -18,6 +18,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     variables never override the cluster files.
 - Releases check that `plugin.json`'s version matches the tag.
 
+### Documentation
+- README: the build commands match the Makefile (`make release`, `make check`),
+  the rotation retry and `status` notes are accurate, and the plugin's `login`
+  note is clearer. `CLAUDE.md` describes the current pass-auth behaviour and
+  tests.
+
+### Internal
+- `make lint` shellchecks the plugin launcher.
+- The launch-path test passes every `PROXMOX_*` variable the plugin sets,
+  unset, empty or as a literal placeholder.
+- `.gitignore` ignores only a root `.mcp.json`, so the plugin's is tracked.
+- Two test lint suppressions that no longer suppressed anything are gone; the
+  remaining one is an `#[expect]` with a reason.
+
 ## [0.17.0] - 2026-11-14
 
 Fixes from a second review of the GPG token code: unlock advice that names the

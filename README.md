@@ -26,10 +26,10 @@ On older versions, add the marketplace first:
 ```
 
 The plugin's launcher downloads the release binary matching the plugin version
-for your platform (linux or macOS, amd64 or arm64), and checks its SHA-256
+for your platform (Linux or macOS, amd64 or arm64), and checks its SHA-256
 against the release's `checksums.txt`. It caches the binary under
-`~/.cache/proxmox-mcp/v<version>/`, or `$XDG_CACHE_HOME` if set. A plugin
-update fetches the matching new binary. If there's no download for your
+`~/.cache/proxmox-mcp/v<version>/` (`$XDG_CACHE_HOME/proxmox-mcp/v<version>/`
+if that's set). A plugin update fetches the matching new binary. If there's no download for your
 platform, or the download fails, it falls back to a `proxmox-mcp` on your
 `PATH`. A checksum mismatch always stops it.
 
@@ -38,10 +38,12 @@ The plugin then reads your clusters the same way the server always does, from
 also passes through `PROXMOX_URL`, `PROXMOX_TOKEN`, `PROXMOX_INSECURE` and
 `PROXMOX_CLUSTER` if they're exported in the environment Claude Code was
 started from. When they aren't, they arrive empty and are ignored, so the
-cluster files apply. For GPG-encrypted tokens, run `proxmox-mcp login`
-once from a terminal: the plugin's binary lives in the cache, so for that
-step install one with `cargo install --git https://github.com/3kirt/proxmox-mcp`,
-or run the cached binary directly.
+cluster files apply.
+
+For GPG-encrypted tokens, run `proxmox-mcp login` once from a terminal. The
+plugin keeps its binary in the cache rather than on your `PATH`, so either run
+the cached binary directly, or install one with
+`cargo install --git https://github.com/3kirt/proxmox-mcp`.
 
 ## Configuration
 
@@ -193,20 +195,21 @@ line is the full `USER@REALM!TOKENID=SECRET` token.
 3. **Check it.** `proxmox-mcp status` shows each cluster's URL and token
    source. For a pass entry it also shows the recipients and whether gpg-agent
    has the key unlocked. It asks gpg-agent over its socket and doesn't
-   decrypt anything. A passphrase-less key or a smartcard can report
-   "not cached" and still decrypt fine.
+   decrypt anything, so it's informational only: for a smartcard key,
+   gpg-agent doesn't report the PIN state at all.
 4. **Unlock when needed.** The server never prompts. If gpg-agent hasn't cached
    the passphrase, tool calls for that cluster fail with *"Proxmox token is
    locked … run `proxmox-mcp unlock`"*. Run `proxmox-mcp unlock` in a terminal,
    then retry; there's no need to restart the server. `unlock` covers every
    cluster with a `pass_entry`, or just one with `--cluster`; a cluster it
    can't unlock (e.g. a logged-out entry) is reported without stopping the
-   rest. The server starts
-   even while the key is locked, and keeps a decrypted token in memory after
-   its first successful read.
+   rest. The server starts even while the key is locked, and keeps a decrypted
+   token in memory after its first successful read.
 
-A 401 makes the server re-read the entry on the next call, so rotating a token
-with `proxmox-mcp login` takes effect without a restart. `proxmox-mcp logout
+When Proxmox rejects the token with a 401, the server re-reads the entry at
+once, and retries the call if the token changed. Rotating a token with
+`proxmox-mcp login` therefore takes effect on the next call, without a
+restart. `proxmox-mcp logout
 --cluster lab` deletes the stored token, leaving `pass_entry` in place for the
 next `login`.
 
@@ -278,13 +281,18 @@ UNIX-epoch fields (`ctime`, `starttime`, `endtime`) are returned with an
 ## Build & run
 
 ```sh
-make build      # cargo build --release
-make test       # cargo test --all
-make lint       # clippy -D warnings + fmt --check
+make release    # release build: target/release/proxmox-mcp
+make test       # unit tests plus the end-to-end launch-path tests
+make lint       # secrets scan, clippy -D warnings, fmt --check, shellcheck
+make check      # the full pre-release gate: lint, test, cargo-deny, release build, smoke test
 make install    # installs to ~/.cargo/bin
 ```
 
-Register with an MCP client (stdio transport):
+The toolchain is pinned in `rust-toolchain.toml`, which rustup picks up
+automatically.
+
+To register a binary you built yourself with an MCP client other than the
+plugin (stdio transport):
 
 ```json
 {
